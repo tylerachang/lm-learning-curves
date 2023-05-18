@@ -424,11 +424,7 @@ class CurveAnnotator:
             print('Error: no examples selected; run get_examples() first.')
         n_examples = np.sum(tokens_mask)
         # Load n-gram surprisals.
-        ngrams_path = os.path.join(self.cache_dir, '{0}_{1}gram_surprisals.npy'.format(reference_id, ngram_n))
-        if os.path.isfile(ngrams_path):
-            ngram_surprisals = np.load(ngrams_path, allow_pickle=False)
-        else:
-            print('Error: no n-gram surprisals cached; run get_ngram_surprisals() first.')
+        ngram_surprisals = self.get_ngram_surprisals_with_backoff(reference_id, ngram_n)
         assert tokens_mask.shape == ngram_surprisals.shape
         # Compute context log perplexities. Equal to the mean surprisal of the context tokens.
         context_logppls = -1.0 * np.ones(n_examples)
@@ -459,11 +455,7 @@ class CurveAnnotator:
             print('Error: no examples selected; run get_examples() first.')
         n_examples = np.sum(tokens_mask)
         # Load n-gram surprisals.
-        ngrams_path = os.path.join(self.cache_dir, '{0}_{1}gram_surprisals.npy'.format(reference_id, ngram_n))
-        if os.path.isfile(ngrams_path):
-            ngram_surprisals = np.load(ngrams_path, allow_pickle=False)
-        else:
-            print('Error: no n-gram surprisals cached; run get_ngram_surprisals() first.')
+        ngram_surprisals = self.get_ngram_surprisals_with_backoff(reference_id, ngram_n)
         assert tokens_mask.shape == ngram_surprisals.shape
         # Compute target surprisal.
         target_surprisals = -1.0 * np.ones(n_examples)

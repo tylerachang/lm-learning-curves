@@ -87,6 +87,9 @@ def compute_aoa_vals(log_steps, surprisals, chance_surprisal, proportion=0.50):
     negative_chance = -1.0 * chance_surprisal
     sigmoid_params = run_sigmoid_regression(log_steps, negative_surprisals)
     ymin = negative_chance
+    # Best surprisal attained by the model. We use this instead of the final
+    # surprisal, both for stability and for cases where the surprisal might
+    # be worse later in training.
     ymax = np.max(negative_surprisals)
     xmin = np.min(log_steps)
     xmax = np.max(log_steps)
