@@ -23,6 +23,7 @@ get_confidence_scores()
 get_variability_scores()
 get_aoa_values()
 get_ngram_surprisals()
+get_ngram_surprisals_with_backoff()
 get_context_lengths()
 get_context_ngram_logppls()
 get_target_ngram_surprisals()
@@ -85,7 +86,8 @@ class CurveAnnotator:
                 # Sequence up to and including the index.
                 examples.append(list(sequence[0:index+1]))
         print('Using {} examples.'.format(len(examples)))
-        assert len(examples) == sequences.shape[0] * per_sequence
+        if per_sequence is not None:
+            assert len(examples) == sequences.shape[0] * per_sequence
         return examples
 
     # Returns the surprisal curves.
@@ -150,7 +152,7 @@ class CurveAnnotator:
     # Shape: (n_examples).
     def get_confidence_scores(self, last_n=27):
         # Load surprisal curves or throw error.
-        surprisal_curves_path = os.path.join(self.cache_dir, 'suprisal_curves.npy')
+        surprisal_curves_path = os.path.join(self.cache_dir, 'surprisal_curves.npy')
         if os.path.isfile(surprisal_curves_path):
             surprisal_curves = np.load(surprisal_curves_path, allow_pickle=False)
         else:
@@ -163,7 +165,7 @@ class CurveAnnotator:
     # Shape: (n_examples).
     def get_variability_scores(self, last_n=27):
         # Load surprisal curves or throw error.
-        surprisal_curves_path = os.path.join(self.cache_dir, 'suprisal_curves.npy')
+        surprisal_curves_path = os.path.join(self.cache_dir, 'surprisal_curves.npy')
         if os.path.isfile(surprisal_curves_path):
             surprisal_curves = np.load(surprisal_curves_path, allow_pickle=False)
         else:
@@ -214,7 +216,9 @@ class CurveAnnotator:
         return all_aoa_vals
 
     # For each sequence in sequences_path, returns the sequence of n-gram surprisals
-    # conditioned on the previous tokens.
+    # conditioned on the previous tokens. For tokens with n-gram probability zero,
+    # the surprisal is np.nan. Use get_ngram_surprisals_with_backoff() to
+    # ensure no np.nans.
     #
     # Output shape: (n_sequences, seq_len).
     # Note: n_sequences is the number of input sequences, not the number of
@@ -235,9 +239,9 @@ class CurveAnnotator:
         if os.path.isfile(outpath):
             print('Using cached {}-gram surprisals.'.format(ngram_n))
             return np.load(outpath, allow_pickle=False)
-        # Array of conditional n-gram probabilities.
-        # Entry i_0, ..., i_{n-1} is the probability of
-        # i_{n-1} given i_0, ..., i_{n-2}.
+        # Array of n-gram counts.
+        # Entry i_0, ..., i_{n-1} is the count of
+        # i_0, ..., i_{n-2}, i_{n-1}.
         ngrams_path = os.path.join(self.cache_dir, '{0}_{1}gram_counts.pickle'.format(reference_id, ngram_n))
         # Get ngram counts.
         if os.path.isfile(ngrams_path):
@@ -310,8 +314,9 @@ class CurveAnnotator:
                 pickle.dump(ngrams, handle, protocol=pickle.HIGHEST_PROTOCOL)
         ngrams.default_factory = lambda: Counter()
         # Convert counts to conditional probabilities.
+        # Entry i_0, ..., i_{n-1} is the probability of
+        # i_{n-1} given i_0, ..., i_{n-2}.
         print('Converting counts to probabilities.')
-        min_prob = math.inf
         for context_key in ngrams:
             # Convert the counts to probabilities.
             counts = ngrams[context_key]
@@ -320,14 +325,13 @@ class CurveAnnotator:
             for target_key, count in counts.items():
                 prob = count / total
                 probs_dict[target_key] = prob
-                if prob < min_prob:
-                    min_prob = prob
             ngrams[context_key] = probs_dict
 
         # Get scores for all sequences.
         # Note: includes all examples, even those not included in get_examples().
         # This is because we want the surprisal for every token in every sequence,
         # to aggregate depending on each example and window size.
+        # Surprisal is np.nan for n-grams with probability zero.
         print('Computing {}-gram surprisals.'.format(ngram_n))
         sequences = get_file_examples(sequences_path)
         # Assume all the same length.
@@ -344,11 +348,46 @@ class CurveAnnotator:
                 # Increment the corresponding ngram:
                 conditional_prob = ngrams[tuple(curr[:-1])][curr[-1]]
                 if np.isclose(conditional_prob, 0.0):
-                    conditional_prob = min_prob
-                surprisal = -1.0 * np.log2(conditional_prob)
+                    surprisal = np.nan
+                else:
+                    surprisal = -1.0 * np.log2(conditional_prob)
                 surprisals[sequence_i, token_i] = surprisal
         np.save(outpath, surprisals, allow_pickle=False)
         return surprisals
+
+    # Returns n-gram suprisals as in get_ngram_surprisals(), but using backoff
+    # to ensure no np.nans. For backoff, zero probabilities for ngram n are
+    # replaced with the probabilities for ngram n-1. Unigram surprisals are
+    # smoothed to the minimum nonzero probability.
+    #
+    # Assumes that get_ngram_surprisals() has already been run for all
+    # 1 <= n <= ngram_n.
+    def get_ngram_surprisals_with_backoff(self, reference_id, ngram_n):
+        to_return = None
+        has_nan = True
+        curr_ngram_n = ngram_n
+        while curr_ngram_n > 0 and has_nan:
+            # Load from cache.
+            inpath = os.path.join(self.cache_dir, '{0}_{1}gram_surprisals.npy'.format(reference_id, curr_ngram_n))
+            if os.path.isfile(inpath):
+                curr_ngrams = np.load(inpath, allow_pickle=False)
+            else:
+                print('Cannot find cached {}-gram surprisals; run get_ngram_surprisals() first.'.format(curr_ngram_n))
+            # If unigrams, fill in with maximum surprisal (minimum nonzero probability).
+            if curr_ngram_n == 1:
+                max_surprisal = np.nanmax(curr_ngrams)
+                curr_ngrams[np.isnan(curr_ngrams)] = max_surprisal
+            # Fill in np.nans (backoff).
+            if to_return is None:
+                to_return = curr_ngrams
+            else:
+                nan_mask = np.isnan(to_return)
+                to_return[nan_mask] = curr_ngrams[nan_mask]
+            if np.sum(np.isnan(to_return)) == 0:
+                has_nan = False
+            # Decrement.
+            curr_ngram_n -= 1
+        return to_return
 
     # Returns the number of context tokens for each example.
     # Shape: (n_examples).
