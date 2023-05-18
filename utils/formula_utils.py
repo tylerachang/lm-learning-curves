@@ -4,6 +4,7 @@ Formulas for the monolingual pre-training analyses.
 
 import numpy as np
 from scipy.optimize import curve_fit
+from sklearn.linear_model import LinearRegression
 
 # Convert a checkpoint number to time step.
 def exponential_checkpoint_to_step(checkpoint_n, s0, s1, t1):
@@ -102,10 +103,10 @@ def compute_aoa_vals(log_steps, surprisals, chance_surprisal, proportion=0.50):
 
 # Fine-grained trajectory utilities.
 # Returns the slope for each window, with some stride.
-# Output shapes: (n_windows). With window_size=1, we have n_windows = n_surprisals-window_size+1.
+# Output shapes: (n_windows). With stride=1, we have n_windows = n_surprisals-window_size+1.
 # Note: the first checkpoint (step 0) should not be included, because the log step
 # is negative infinity.
-def get_curve_slopes(log_steps, surprisals, window_size=10, stride=1):
+def get_curve_slopes(log_steps, surprisals, window_size=5, stride=1):
     n_vals = log_steps.shape[0]
     slopes = []
     for start_i in range(0, n_vals-window_size+1, stride):

@@ -8,7 +8,7 @@ import pickle
 import gc
 
 from utils.data_utils import get_examples as get_file_examples
-from utils.formula_utils import compute_aoa_vals
+from utils.formula_utils import compute_aoa_vals, get_curve_slopes
 
 """
 Class to get annotations for curves.
@@ -27,6 +27,7 @@ get_ngram_surprisals_with_backoff()
 get_context_lengths()
 get_context_ngram_logppls()
 get_target_ngram_surprisals()
+get_curve_slopes()
 
 """
 class CurveAnnotator:
@@ -468,3 +469,31 @@ class CurveAnnotator:
                 example_i += 1
         assert example_i == n_examples
         return target_surprisals
+
+    def get_curve_slopes(self, window_size, stride):
+        # Load from cache if possible.
+        outpath = os.path.join(self.cache_dir, 'slopes_window{0}_stride{1}.npy'.format(window_size, stride))
+        if os.path.isfile(outpath):
+            return np.load(outpath, allow_pickle=False)
+        # Load surprisal curves or throw error.
+        surprisal_curves_path = os.path.join(self.cache_dir, 'surprisal_curves.npy')
+        if os.path.isfile(surprisal_curves_path):
+            surprisal_curves = np.load(surprisal_curves_path, allow_pickle=False)
+        else:
+            print('Error: no surprisal curves cached; run get_surprisal_curves() first.')
+        n_curves = surprisal_curves.shape[0]
+        # Get corresponding log10 steps.
+        log10_steps = self.get_log10_steps()
+        if np.isinf(log10_steps[0]):
+            # If first checkpoint step is zero, then log10 is -inf.
+            log10_steps = log10_steps[1:]
+            surprisal_curves = surprisal_curves[:, 1:]
+        # Compute slopes.
+        # Compute one set of slopes to get shape.
+        n_slopes = get_curve_slopes(log_steps, surprisals[0, :], window_size=window_size, stride=stride).shape[0]
+        curve_slopes = np.nan * np.ones((n_curves, n_slopes))
+        for curve_i in tqdm(range(n_curves)):
+            slopes = get_curve_slopes(log_steps, surprisals[curve_i, :], window_size=window_size, stride=stride)
+            curve_slopes[curve_i, :] = slopes
+        np.save(outpath, curve_slopes, allow_pickle=False)
+        return curve_slopes
