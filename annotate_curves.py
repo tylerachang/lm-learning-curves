@@ -72,6 +72,10 @@ def main(args):
                 reference_lines_mask=None, vocab_size=args.vocab_size, prune_every=1000000,
                 prune_minimum=2)
         del ngram_scores
+    # Get curve slopes.
+    curve_slopes = annotator.get_curve_slopes(5, 1)
+    del curve_slopes
+    # Done.
     print("Done.")
 
 

@@ -113,6 +113,6 @@ def get_curve_slopes(log_steps, surprisals, window_size=5, stride=1):
         # Compute slope.
         reg = LinearRegression(fit_intercept=True).fit(log_steps[start_i:start_i+window_size].reshape(-1, 1),
                                                        surprisals[start_i:start_i+window_size])
-        slope = reg.coef_
+        slope = reg.coef_[0]
         slopes.append(slope)
     return np.array(slopes)

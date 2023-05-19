@@ -490,10 +490,10 @@ class CurveAnnotator:
             surprisal_curves = surprisal_curves[:, 1:]
         # Compute slopes.
         # Compute one set of slopes to get shape.
-        n_slopes = get_curve_slopes(log_steps, surprisals[0, :], window_size=window_size, stride=stride).shape[0]
+        n_slopes = get_curve_slopes(log10_steps, surprisal_curves[0, :], window_size=window_size, stride=stride).shape[0]
         curve_slopes = np.nan * np.ones((n_curves, n_slopes))
         for curve_i in tqdm(range(n_curves)):
-            slopes = get_curve_slopes(log_steps, surprisals[curve_i, :], window_size=window_size, stride=stride)
+            slopes = get_curve_slopes(log10_steps, surprisal_curves[curve_i, :], window_size=window_size, stride=stride)
             curve_slopes[curve_i, :] = slopes
         np.save(outpath, curve_slopes, allow_pickle=False)
         return curve_slopes
