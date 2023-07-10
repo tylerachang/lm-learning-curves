@@ -6,6 +6,7 @@ from collections import defaultdict, Counter
 import math
 import pickle
 import gc
+from pygam import LinearGAM
 
 from utils.data_utils import get_examples as get_file_examples
 from utils.formula_utils import compute_aoa_vals, get_curve_slopes
@@ -424,8 +425,12 @@ class CurveAnnotator:
         else:
             print('Error: no examples selected; run get_examples() first.')
         n_examples = np.sum(tokens_mask)
-        # Load n-gram surprisals.
-        ngram_surprisals = self.get_ngram_surprisals_with_backoff(reference_id, ngram_n)
+        # Load n-gram surprisals, for all n < ngram_n.
+        # Shape: (ngram_n, n_examples, seq_len).
+        ngram_surprisals = []
+        for ngram_i in range(ngram_n):
+            ngram_surprisals.append(self.get_ngram_surprisals_with_backoff(reference_id, ngram_i+1))
+        ngram_surprisals = np.stack(ngram_surprisals, axis=0)
         assert tokens_mask.shape == ngram_surprisals.shape
         # Compute context log perplexities. Equal to the mean surprisal of the context tokens.
         context_logppls = -1.0 * np.ones(n_examples)
@@ -438,8 +443,18 @@ class CurveAnnotator:
                 else:
                     start_i = target_index - window_size
                     start_i = start_i if start_i > 0 else 0
-                logppl = np.mean(ngram_surprisals[sequence_i, start_i:target_index])
-                context_logppls[example_i] = logppl
+                # Compute log-probability of each context token, then mean.
+                sum_logprob = 0.0
+                for ngram_i in range(ngram_n-1):
+                    if start_i+ngram_i >= target_index:
+                        break
+                    # For the first context tokens, use lower ngram.
+                    sum_logprob += ngram_surprisals[ngram_i, sequence_i, start_i+ngram_i]
+                if start_i+ngram_n-1 < target_index:
+                    # Start using the ngram_n surprisal for context token ngram_n-1.
+                    sum_logprob += np.sum(ngram_surprisals[-1, sequence_i, start_i+ngram_n-1:target_index])
+                mean_logprob = sum_logprob / (target_index - start_i)
+                context_logppls[example_i] = mean_logprob
                 example_i += 1
         assert example_i == n_examples
         return context_logppls
@@ -470,6 +485,7 @@ class CurveAnnotator:
         assert example_i == n_examples
         return target_surprisals
 
+    # Deprecated. Not useful.
     def get_curve_slopes(self, window_size, stride):
         # Load from cache if possible.
         outpath = os.path.join(self.cache_dir, 'slopes_window{0}_stride{1}.npy'.format(window_size, stride))
@@ -497,3 +513,40 @@ class CurveAnnotator:
             curve_slopes[curve_i, :] = slopes
         np.save(outpath, curve_slopes, allow_pickle=False)
         return curve_slopes
+
+
+    # Returns the GAM curves fitted to the surprisal curves.
+    # Shape: (n_examples, n_checkpoints).
+    # If first checkpoint is step 0, shape: (n_examples, n_checkpoints-1).
+    def get_gam_curves(self):
+        # Load from cache if possible.
+        gams_path = os.path.join(self.cache_dir, 'gam_curves.npy')
+        if os.path.isfile(gams_path):
+            print('Using cached GAM curves.')
+            return np.load(gams_path, allow_pickle=False)
+        print('Computing GAM curves.')
+        # Load surprisal curves or throw error.
+        surprisal_curves_path = os.path.join(self.cache_dir, 'surprisal_curves.npy')
+        if os.path.isfile(surprisal_curves_path):
+            surprisal_curves = np.load(surprisal_curves_path, allow_pickle=False)
+        else:
+            print('Error: no surprisal curves cached; run get_surprisal_curves() first.')
+        # Get corresponding log10 steps.
+        log10_steps = self.get_log10_steps()
+        if np.isinf(log10_steps[0]):
+            # If first checkpoint step is zero, then log10 is -inf.
+            log10_steps = log10_steps[1:]
+            surprisal_curves = surprisal_curves[:, 1:]
+        # Fit GAM curve for each surprisal curve.
+        n_curves = surprisal_curves.shape[0]
+        gam_curves = np.zeros((n_curves, log10_steps.shape[0]))
+        for curve_i in tqdm(range(n_curves)):
+            # Note: uses 25 penalized b-splines.
+            # Defaults to identity link and linear terms.
+            gam = LinearGAM(n_splines=25)
+            gam.gridsearch(X=log10_steps.reshape(-1, 1), y=surprisal_curves[example_i, :],
+                    lam=np.logspace(-3, 3, 11, base=10.0), progress=False)
+            predicted = gam.predict(log10_steps)
+            gam_curves[curve_i, :] = predicted
+        np.save(gams_path, gam_curves, allow_pickle=False)
+        return gam_curves

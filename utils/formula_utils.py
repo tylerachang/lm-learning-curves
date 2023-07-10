@@ -75,6 +75,11 @@ def get_aoa(ymin, ymax, proportion, xmin, xmax, sigmoid_params):
         return xmin, None
     # Compute the intersection between the fitted sigmoid and ythreshold.
     intersectionx = xmid - scale * np.log((end-start)/(ythreshold-start) - 1.0)
+    # Clip to xmin and xmax.
+    if intersectionx < xmin:
+        return xmin, None
+    if intersectionx > xmax:
+        return xmax, None
     return intersectionx, ythreshold
 # Returns: (aoa, surprisal_threshold, start, end, xmid, scale).
 # surprisal_threshold may be -1.0 if the AoA was set to the minimum or maximum step.
