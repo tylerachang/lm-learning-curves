@@ -7,7 +7,8 @@ python3 lm-learning-curves/annotate_curves.py \
 --sequences_file="datasets_tokenized_split/en_tokenized_eval_100000.txt" \
 --vocab_size=50004 --model_dir="models/gpt2_0" \
 --annotator_cache="annotators/gpt2_0" \
---surprisals_dir="surprisals/gpt2_0" --per_sequence=10
+--surprisals_dir="surprisals/gpt2_0" --per_sequence=10 \
+--compute_ngrams=True
 
 """
 
@@ -35,6 +36,8 @@ def create_parser():
     parser.add_argument('--per_sequence', type=int, default=10)
     # Vocab size to initialize n-gram counts and to compute chance surprisal.
     parser.add_argument('--vocab_size', type=int, default=50004)
+    # Whether to run n-gram computations.
+    parser.add_argument('--compute_ngrams', type=bool, default=False)
     return parser
 
 
@@ -54,24 +57,37 @@ def main(args):
     chance_surprisal = -1.0 * np.log2(1.0 / args.vocab_size)
     aoa_values = annotator.get_aoa_values(chance_surprisal=chance_surprisal, proportion=0.50)
     del aoa_values
-    # To compute and cache n-gram scores for the full training set.
-    # Note: the cache for these files can be transferred for different training
-    # runs, because the full train set stats are the same.
-    # E.g. full_train_5gram_surprisals.npy and full_train_5gram_counts.pickle.
-    # No pruning for n=1,2:
-    for ngram_n in [1,2]:
-        ngram_scores = annotator.get_ngram_surprisals('full_train', ngram_n=ngram_n,
-                sequences_path=args.sequences_file, reference_path=args.training_file,
-                reference_lines_mask=None, vocab_size=args.vocab_size, prune_every=999999999,
-                prune_minimum=None)
-        del ngram_scores
-    # Prune every 1M sequences with prune_minimum 2 for n=3,4,5:
-    for ngram_n in [3,4,5]:
-        ngram_scores = annotator.get_ngram_surprisals('full_train', ngram_n=ngram_n,
-                sequences_path=args.sequences_file, reference_path=args.training_file,
-                reference_lines_mask=None, vocab_size=args.vocab_size, prune_every=1000000,
-                prune_minimum=2)
-        del ngram_scores
+    # Compute GAM AoAs.
+    gam_aoas = annotator.get_gam_aoas(chance_surprisal=chance_surprisal, proportion=0.50, gam_granularity=1000)
+    del gam_aoas
+
+    if args.compute_ngrams:
+        # To compute and cache n-gram scores for the full training set.
+        # Note: the cache for these files can be transferred for different training
+        # runs, because the full train set stats are the same.
+        # E.g. full_train_5gram_surprisals.npy and full_train_5gram_counts.pickle.
+        # No pruning for n=1,2:
+        for ngram_n in [1,2]:
+            ngram_scores = annotator.get_ngram_surprisals('full_train', ngram_n=ngram_n,
+                    sequences_path=args.sequences_file, reference_path=args.training_file,
+                    reference_lines_mask=None, vocab_size=args.vocab_size, prune_every=999999999,
+                    prune_minimum=None)
+            del ngram_scores
+        # Prune every 1M sequences with prune_minimum 2 for n=3,4,5:
+        for ngram_n in [3,4,5]:
+            ngram_scores = annotator.get_ngram_surprisals('full_train', ngram_n=ngram_n,
+                    sequences_path=args.sequences_file, reference_path=args.training_file,
+                    reference_lines_mask=None, vocab_size=args.vocab_size, prune_every=1000000,
+                    prune_minimum=2)
+            del ngram_scores
+
+    # Get UMAP coordinates.
+    # For different numbers of sample curves:
+    # 10K: n_neighbors=5
+    # 100K: n_neighbors=50
+    # 1M: n_neighbors=500
+    umap_coords = annotator.get_umap_coordinates(n_neighbors=500, n_components=2)
+    del umap_coords
     # Fit GAMs.
     gam_curves = annotator.get_gam_curves()
     del gam_curves

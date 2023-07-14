@@ -7,6 +7,7 @@ import math
 import pickle
 import gc
 from pygam import LinearGAM
+import umap
 
 from utils.data_utils import get_examples as get_file_examples
 from utils.formula_utils import compute_aoa_vals, get_curve_slopes
@@ -64,7 +65,6 @@ class CurveAnnotator:
         # Get examples mask if cached.
         tokens_mask_path = os.path.join(self.cache_dir, 'tokens_mask.npy')
         if os.path.isfile(tokens_mask_path):
-            print('Using cached examples.')
             tokens_mask = np.load(tokens_mask_path, allow_pickle=False)
         else:
             print('Selecting examples.')
@@ -98,7 +98,6 @@ class CurveAnnotator:
         # Load from cache if possible.
         surprisal_curves_path = os.path.join(self.cache_dir, 'surprisal_curves.npy')
         if os.path.isfile(surprisal_curves_path):
-            print('Using cached surprisal curves.')
             return np.load(surprisal_curves_path, allow_pickle=False)
         print('Loading surprisal curves.')
         # Load examples mask or throw error.
@@ -150,7 +149,7 @@ class CurveAnnotator:
         return surprisal_curves
 
     # Returns the confidence scores, the mean surprisal during the last_n checkpoints
-    # of pre-training.
+    # of pre-training. Misnomer: high values = low confidence.
     # Shape: (n_examples).
     def get_confidence_scores(self, last_n=27):
         # Load surprisal curves or throw error.
@@ -191,7 +190,6 @@ class CurveAnnotator:
         # Load from cache if possible.
         aoa_path = os.path.join(self.cache_dir, 'aoa.npy')
         if os.path.isfile(aoa_path):
-            print('Using cached AoA values.')
             return np.load(aoa_path, allow_pickle=False)
         print('Computing AoA values.')
         # Load surprisal curves or throw error.
@@ -216,6 +214,58 @@ class CurveAnnotator:
             all_aoa_vals[curve_i, :] = np.array(aoa_vals)
         np.save(aoa_path, all_aoa_vals, allow_pickle=False)
         return all_aoa_vals
+
+    # Get AoA scores, using fitted GAMs instead of sigmoids.
+    # The first point on the GAM where the surprisal is less than or equal to
+    # halfway between random chance and minimum surprisal.
+    # Shape: (n_examples, 2).
+    # Column 0: AoA (log-steps).
+    # Column 1: surprisal threshold.
+    def get_gam_aoas(self, chance_surprisal=None, proportion=0.50, gam_granularity=1000):
+        # Load from cache if possible.
+        gam_aoa_path = os.path.join(self.cache_dir, 'gam_aoa.npy')
+        if os.path.isfile(gam_aoa_path):
+            return np.load(gam_aoa_path, allow_pickle=False)
+        print('Computing AoA values using GAMs.')
+        # Note: fitted GAMs are not loaded from the cache, because they are not
+        # saved with high granularity.
+        surprisal_curves_path = os.path.join(self.cache_dir, 'surprisal_curves.npy')
+        if os.path.isfile(surprisal_curves_path):
+            surprisal_curves = np.load(surprisal_curves_path, allow_pickle=False)
+        else:
+            print('Error: no surprisal curves cached; run get_surprisal_curves() first.')
+        # Get corresponding log10 steps.
+        log10_steps = self.get_log10_steps()
+        if np.isinf(log10_steps[0]):
+            log10_steps = log10_steps[1:]
+            surprisal_curves = surprisal_curves[:, 1:]
+        # For high granularity GAM.
+        gam_x = np.linspace(log10_steps[0], log10_steps[-1], num=gam_granularity, endpoint=True)
+        # Fit GAM and run AoA for each curve.
+        n_curves = surprisal_curves.shape[0]
+        gam_aoas = np.nan * np.ones((n_curves, 2))
+        for curve_i, surprisal_curve in tqdm(enumerate(surprisal_curves)):
+            # Same as in get_gam_curves().
+            gam = LinearGAM(n_splines=25)
+            gam.gridsearch(X=log10_steps.reshape(-1, 1), y=surprisal_curve,
+                    lam=np.logspace(-3, 3, 11, base=10.0), progress=False)
+            gam_curve = gam.predict(gam_x)
+            # Get AoA.
+            # Surprisals decreasing.
+            ymax = chance_surprisal
+            ymin = np.min(gam_curve)
+            ythreshold = ymax*(1-proportion) + ymin*proportion
+            gam_aoas[curve_i, 1] = ythreshold
+            if ythreshold >= chance_surprisal:
+                # Entire curve is above chance.
+                gam_aoas[curve_i, 0] = log10_steps[-1]
+                continue
+            for step_i, log10_step in enumerate(gam_x):
+                if gam_curve[step_i] <= ythreshold:
+                    gam_aoas[curve_i, 0] = log10_step
+                    break
+        np.save(gam_aoa_path, gam_aoas, allow_pickle=False)
+        return gam_aoas
 
     # For each sequence in sequences_path, returns the sequence of n-gram surprisals
     # conditioned on the previous tokens. For tokens with n-gram probability zero,
@@ -393,6 +443,7 @@ class CurveAnnotator:
 
     # Returns the number of context tokens for each example.
     # Shape: (n_examples).
+    # Note: as a predictor, np.log(context_lengths) tends to work better.
     def get_context_lengths(self):
         # Load examples mask or throw error.
         tokens_mask_path = os.path.join(self.cache_dir, 'tokens_mask.npy')
@@ -431,7 +482,8 @@ class CurveAnnotator:
         for ngram_i in range(ngram_n):
             ngram_surprisals.append(self.get_ngram_surprisals_with_backoff(reference_id, ngram_i+1))
         ngram_surprisals = np.stack(ngram_surprisals, axis=0)
-        assert tokens_mask.shape == ngram_surprisals.shape
+        assert tokens_mask.shape[0] == ngram_surprisals.shape[1]
+        assert tokens_mask.shape[1] == ngram_surprisals.shape[2]
         # Compute context log perplexities. Equal to the mean surprisal of the context tokens.
         context_logppls = -1.0 * np.ones(n_examples)
         example_i = 0
@@ -522,7 +574,6 @@ class CurveAnnotator:
         # Load from cache if possible.
         gams_path = os.path.join(self.cache_dir, 'gam_curves.npy')
         if os.path.isfile(gams_path):
-            print('Using cached GAM curves.')
             return np.load(gams_path, allow_pickle=False)
         print('Computing GAM curves.')
         # Load surprisal curves or throw error.
@@ -544,9 +595,30 @@ class CurveAnnotator:
             # Note: uses 25 penalized b-splines.
             # Defaults to identity link and linear terms.
             gam = LinearGAM(n_splines=25)
-            gam.gridsearch(X=log10_steps.reshape(-1, 1), y=surprisal_curves[example_i, :],
+            gam.gridsearch(X=log10_steps.reshape(-1, 1), y=surprisal_curves[curve_i, :],
                     lam=np.logspace(-3, 3, 11, base=10.0), progress=False)
             predicted = gam.predict(log10_steps)
             gam_curves[curve_i, :] = predicted
         np.save(gams_path, gam_curves, allow_pickle=False)
         return gam_curves
+
+    # Returns the UMAP coordinates for the surprisal curves.
+    # Shape: (n_examples, n_components).
+    def get_umap_coordinates(self, n_neighbors=-1, n_components=2):
+        # Load from cache if possible.
+        umap_path = os.path.join(self.cache_dir, 'umap_coords_{0}d_{1}neighbors.npy'.format(n_components, n_neighbors))
+        if os.path.isfile(umap_path):
+            return np.load(umap_path, allow_pickle=False)
+        print('Computing UMAP coordinates.')
+        # Load surprisal curves or throw error.
+        surprisal_curves_path = os.path.join(self.cache_dir, 'surprisal_curves.npy')
+        if os.path.isfile(surprisal_curves_path):
+            surprisal_curves = np.load(surprisal_curves_path, allow_pickle=False)
+        else:
+            print('Error: no surprisal curves cached; run get_surprisal_curves() first.')
+        # Run UMAP.
+        umap_model = umap.UMAP(low_memory=False, n_neighbors=n_neighbors, metric='euclidean',
+                               n_components=2, verbose=True)
+        umap_coords = umap_model.fit_transform(surprisal_curves)
+        np.save(umap_path, umap_coords, allow_pickle=False)
+        return umap_coords
