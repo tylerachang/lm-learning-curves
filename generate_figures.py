@@ -1,5 +1,5 @@
 """
-Plot figures and run analyses.
+Plot figures and get correlations.
 """
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -48,14 +48,6 @@ def get_correlations(scores):
         r, p = scipy.stats.pearsonr(scores[i], scores[j])
         correlations.append(r)
     return correlations
-
-# Input: list of score vectors.
-# Prints R^2 values.
-def run_regressions(scores):
-    # Regress over:
-    # Target n-gram log-frequency.
-    # Context n-gram log-frequency for different window-sizes.
-    return
 
 
 # Mean correlation across runs for confidence, variability, and AoA.
@@ -183,10 +175,6 @@ def dataset_map(annotators):
     confidence_scores = np.power(2, -1.0*confidence_scores)
     plot_correlation_hist(confidence_scores, variability_scores, figname='dataset_map.pdf',
                   xlabel='Confidence (P)', ylabel='Variability (stdev(surprisal))')
-    return
-
-
-def frequency_regressions(annotators):
     return
 
 

@@ -6,8 +6,6 @@ from collections import defaultdict, Counter
 import math
 import pickle
 import gc
-from pygam import LinearGAM
-import umap
 
 from utils.data_utils import get_examples as get_file_examples
 from utils.formula_utils import compute_aoa_vals, get_curve_slopes
@@ -227,6 +225,7 @@ class CurveAnnotator:
         if os.path.isfile(gam_aoa_path):
             return np.load(gam_aoa_path, allow_pickle=False)
         print('Computing AoA values using GAMs.')
+        from pygam import LinearGAM
         # Note: fitted GAMs are not loaded from the cache, because they are not
         # saved with high granularity.
         surprisal_curves_path = os.path.join(self.cache_dir, 'surprisal_curves.npy')
@@ -576,6 +575,7 @@ class CurveAnnotator:
         if os.path.isfile(gams_path):
             return np.load(gams_path, allow_pickle=False)
         print('Computing GAM curves.')
+        from pygam import LinearGAM
         # Load surprisal curves or throw error.
         surprisal_curves_path = os.path.join(self.cache_dir, 'surprisal_curves.npy')
         if os.path.isfile(surprisal_curves_path):
@@ -610,6 +610,7 @@ class CurveAnnotator:
         if os.path.isfile(umap_path):
             return np.load(umap_path, allow_pickle=False)
         print('Computing UMAP coordinates.')
+        import umap
         # Load surprisal curves or throw error.
         surprisal_curves_path = os.path.join(self.cache_dir, 'surprisal_curves.npy')
         if os.path.isfile(surprisal_curves_path):
@@ -622,3 +623,98 @@ class CurveAnnotator:
         umap_coords = umap_model.fit_transform(surprisal_curves)
         np.save(umap_path, umap_coords, allow_pickle=False)
         return umap_coords
+
+    # Assumes SentencePiece Hugging Face tokenizer.
+    # Returns the POS tag sequence (list) for an input example (list of token_ids),
+    # given a tokenizer and spaCy model. The POS tags are matched per token.
+    def pos_tag_example(self, example, tokenizer, spacy_nlp):
+        pos_tags = ['[CLS]']
+        # Process a subsequence of the example (e.g. between [SEP] tokens).
+        def process_sequence(sequence):
+            # Map char idx to token idx.
+            tokens = tokenizer.convert_ids_to_tokens(sequence)
+            text = ''
+            char_to_token_idx = []
+            for token_idx, token in enumerate(tokens):
+                if token_idx == 0:
+                    # Skip new word character for first token.
+                    token = token[1:]
+                token = token.replace('\u2581', ' ')
+                for char in token:
+                    char_to_token_idx.append(token_idx)
+                    text += char
+            # Get and match POS tags.
+            token_labels =  ['[UNMATCHED]']*len(sequence)
+            spacy_sentence = spacy_nlp(text)
+            for spacy_word in spacy_sentence:
+                # Get the set of token indices that share characters with this spaCy word.
+                start_char_idx = spacy_word.idx
+                end_char_idx = start_char_idx + len(spacy_word)
+                token_indices = set()
+                for char_idx in range(start_char_idx, end_char_idx):
+                    token_idx = char_to_token_idx[char_idx]
+                    token_indices.add(token_idx)
+                token_indices = [token_idx for token_idx in token_indices if token_labels[token_idx] == '[UNMATCHED]']
+                # Set the corresponding token labels.
+                # Appends _B (beginning), _I (inside), and _L (last).
+                for token_i, token_idx in enumerate(sorted(token_indices)):
+                    if len(token_indices) == 1:
+                        suffix = '_U'
+                    else:
+                        suffix = '_B' if token_i == 0 else '_I'
+                        if token_i == len(token_indices)-1:
+                            suffix = '_L'
+                    token_labels[token_idx] = spacy_word.pos_ + suffix
+            pos_tags.extend(token_labels)
+        # Tag all subsequences in the example.
+        curr_sequence = []
+        for token_id in example[1:]:
+            if token_id == tokenizer.sep_token_id:
+                process_sequence(curr_sequence)
+                pos_tags.append('[SEP]')
+                curr_sequence = []
+            else:
+                curr_sequence.append(token_id)
+        if len(curr_sequence) > 0:
+            process_sequence(curr_sequence)
+        assert len(pos_tags) == len(example)
+        # Enforce unknown character (<unk>) POS tags.
+        for token_idx in np.argwhere(np.array(example) == tokenizer.unk_token_id)[:, 0]:
+            pos_tags[token_idx] = '[UNK_CHAR]'
+        return pos_tags
+
+    # Return the list of POS tag sequences.
+    # One list of POS tags per example.
+    # You may first need to run: python3 -m spacy download [spacy_model_name]
+    # Default spaCy model: en_core_web_sm
+    def get_pos_tag_sequences(self, sequences_path=None, tokenizer=None):
+        # Load from cache if possible.
+        pos_path = os.path.join(self.cache_dir, 'pos_sequences.txt')
+        if os.path.isfile(pos_path):
+            tag_sequences = []
+            infile = codecs.open(pos_path, 'rb', encoding='utf-8')
+            for line in tqdm(infile):
+                tag_sequences.append(line.strip().split())
+            infile.close()
+            return tag_sequences
+        print('Tagging POS.')
+        import spacy
+        # Load examples.
+        # This should have been run previously with per_sequence set.
+        # Will throw an error otherwise.
+        examples = self.get_examples(sequences_path, per_sequence=None)
+        # Load spaCy. Only need the tagger and tok2vec for POS-tagging.
+        spacy_nlp = spacy.load('en_core_web_sm', disable=['parser', 'ner',
+                'entity_linker', 'entity_ruler', 'lemmatizer', 'textcat', 'textcat_multilabel',
+                'senter', 'sentencizer', 'transformer'])
+        tag_sequences = []
+        for example in tqdm(examples):
+            tag_sequence = self.pos_tag_example(example, tokenizer, spacy_nlp)
+            tag_sequences.append(tag_sequence)
+        # Save to cache.
+        outfile = codecs.open(pos_path, 'wb', encoding='utf-8')
+        for tag_sequence in tag_sequences:
+            outfile.write(' '.join(tag_sequence))
+            outfile.write('\n')
+        outfile.close()
+        return tag_sequences

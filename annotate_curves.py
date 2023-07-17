@@ -8,6 +8,7 @@ python3 lm-learning-curves/annotate_curves.py \
 --vocab_size=50004 --model_dir="models/gpt2_0" \
 --annotator_cache="annotators/gpt2_0" \
 --surprisals_dir="surprisals/gpt2_0" --per_sequence=10 \
+--tokenizer="hf_tokenizer" \
 --compute_ngrams=True
 
 """
@@ -16,6 +17,7 @@ import os
 import argparse
 import numpy as np
 from tqdm import tqdm
+from transformers import AutoTokenizer
 
 from utils.annotator import CurveAnnotator
 from utils.data_utils import get_checkpoints
@@ -38,6 +40,8 @@ def create_parser():
     parser.add_argument('--vocab_size', type=int, default=50004)
     # Whether to run n-gram computations.
     parser.add_argument('--compute_ngrams', type=bool, default=False)
+    # Tokenizer to decode examples for POS tagging.
+    parser.add_argument('--tokenizer', type=str, required=True)
     return parser
 
 
@@ -80,6 +84,11 @@ def main(args):
                     reference_lines_mask=None, vocab_size=args.vocab_size, prune_every=1000000,
                     prune_minimum=2)
             del ngram_scores
+
+    # Get POS tags.
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, cache_dir='hf_cache')
+    examples = annotator.get_pos_tag_sequences(args.sequences_file, tokenizer=tokenizer)
+    del examples
 
     # Get UMAP coordinates.
     # For different numbers of sample curves:
