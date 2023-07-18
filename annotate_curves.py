@@ -98,7 +98,9 @@ def main(args):
     umap_coords = annotator.get_umap_coordinates(n_neighbors=500, n_components=2)
     del umap_coords
     # Fit GAMs.
-    gam_curves = annotator.get_gam_curves()
+    gam_curves = annotator.get_gam_curves(n_splines=25)
+    del gam_curves
+    gam_curves = annotator.get_gam_curves(n_splines=5)
     del gam_curves
     # Done.
     print("Done.")

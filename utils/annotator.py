@@ -565,13 +565,12 @@ class CurveAnnotator:
         np.save(outpath, curve_slopes, allow_pickle=False)
         return curve_slopes
 
-
     # Returns the GAM curves fitted to the surprisal curves.
     # Shape: (n_examples, n_checkpoints).
     # If first checkpoint is step 0, shape: (n_examples, n_checkpoints-1).
-    def get_gam_curves(self):
+    def get_gam_curves(self, n_splines=-1):
         # Load from cache if possible.
-        gams_path = os.path.join(self.cache_dir, 'gam_curves.npy')
+        gams_path = os.path.join(self.cache_dir, 'gam_curves_{}splines.npy'.format(n_splines))
         if os.path.isfile(gams_path):
             return np.load(gams_path, allow_pickle=False)
         print('Computing GAM curves.')
@@ -592,9 +591,9 @@ class CurveAnnotator:
         n_curves = surprisal_curves.shape[0]
         gam_curves = np.zeros((n_curves, log10_steps.shape[0]))
         for curve_i in tqdm(range(n_curves)):
-            # Note: uses 25 penalized b-splines.
+            # Note: uses n_splines penalized b-splines.
             # Defaults to identity link and linear terms.
-            gam = LinearGAM(n_splines=25)
+            gam = LinearGAM(n_splines=n_splines)
             gam.gridsearch(X=log10_steps.reshape(-1, 1), y=surprisal_curves[curve_i, :],
                     lam=np.logspace(-3, 3, 11, base=10.0), progress=False)
             predicted = gam.predict(log10_steps)
