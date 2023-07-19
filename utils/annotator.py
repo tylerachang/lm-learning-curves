@@ -22,12 +22,16 @@ get_surprisal_curves()
 get_confidence_scores()
 get_variability_scores()
 get_aoa_values()
+get_gam_aoas()
 get_ngram_surprisals()
 get_ngram_surprisals_with_backoff()
 get_context_lengths()
 get_context_ngram_logppls()
 get_target_ngram_surprisals()
-get_curve_slopes()
+get_gam_curves()
+get_umap_coordinates()
+get_pos_tag_sequences()
+
 
 """
 class CurveAnnotator:
@@ -717,3 +721,45 @@ class CurveAnnotator:
             outfile.write('\n')
         outfile.close()
         return tag_sequences
+
+    # Shape: (n_examples).
+    # Forgettability scores.
+    # Total height of increasing sections in smoothed GAM curve. Equivalent to
+    # the total difference between each relative minimum and its corresponding
+    # next relative maximum. As long as the curve is the same, independent of
+    # x-scale (i.e. log vs. standard).
+    # Use a smoothed curve, because otherwise increased noise would lead to
+    # many irrelevant increases in surprisal. Each spike and spurious change
+    # would contribute to the forgettability score. This is better captured
+    # by variability, although the two are related (e.g. high variability
+    # might indicate some type of forgettability).
+    def get_forgettability_scores(self):
+        gam_curves = self.get_gam_curves(n_splines=25)
+        # Positive if increasing, negative if decreasing.
+        changes = gam_curves[:, 1:] - gam_curves[:, :-1]
+        # Shape: (n_examples, n_checkpoints-1).
+        changes = np.clip(changes, a_min=0.0, a_max=None)
+        forgettability = np.sum(changes, axis=-1)
+        return forgettability
+
+    # Shape: (n_examples).
+    # Noise variability.
+    # Distance between surprisal curve and fitted GAM with 25 splines.
+    def get_noise_scores(self):
+        # Not-implemented yet.
+        return None
+
+    # Shape: (n_examples).
+    # Fluctuation variability.
+    # Distance between fitted GAMs with 25 vs. 5 splines.
+    def get_fluctuation_scores(self):
+        # Not-implemented yet.
+        return None
+
+
+# Shape: (n_examples).
+# Mean distance between fitted GAMs with 25 splines, across runs.
+# Should capture general trend, so excludes noise.
+def get_crossrun_variability(annotators):
+    # Not-implemented yet.
+    return None

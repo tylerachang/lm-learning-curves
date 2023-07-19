@@ -32,12 +32,13 @@ def plot_correlation_hist(x, y, figname='figure.pdf',
     fig = plt.figure(figsize=figsize)
     ax = fig.add_subplot()
     ax.hist2d(x[mask], y[mask], bins=[100, 100],
-              norm=mpl.colors.LogNorm(clip=True, vmin=1, vmax=5000),
+              norm=mpl.colors.LogNorm(clip=True, vmin=1, vmax=10000),
               cmap='Purples')
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     plt.savefig(os.path.join(FIGURE_DIR, figname), dpi=dpi, bbox_inches='tight')
     return
+
 
 # Input: list of score vectors.
 # Output: list of pairwise correlations.
@@ -50,12 +51,10 @@ def get_correlations(scores):
     return correlations
 
 
-# Mean correlation across runs for confidence, variability, and AoA.
+# Mean correlation across runs for confidence, variability, AoA, and forgettability.
 # Plot correlation for runs 0 and 1.
-# Plot performance correlation during pre-training.
-# Plot correlation with n-grams during pre-training.
-def cross_run_correlations(annotators):
-    print('Computing cross-run correlations for confidence, variability, and AoA.')
+def crossrun_correlations(annotators):
+    print('Computing cross-run correlations for confidence, variability, AoA, and forgettability.')
     # Last 11: last 25% of pre-training.
     # Last 27: last 50% of pre-training.
     last_n = 11
@@ -84,12 +83,12 @@ def cross_run_correlations(annotators):
             figname='variability_crossrun_correlation.pdf',
             xlabel='Run 0 variability', ylabel='Run 1 variability')
 
-    # AoA scores.
+    # GAM AoA scores.
     scores = []
     for annotator in annotators:
-        scores.append(annotator.get_aoa_values()[:, 0])
+        scores.append(annotator.get_gam_aoas()[:, 0])
     correlations = get_correlations(scores)
-    print('AoA cross-run correlation: {0} +/- {1}'.format(
+    print('GAM AoA cross-run correlation: {0} +/- {1}'.format(
             np.mean(correlations), np.std(correlations)))
     print('Min: {0}, Max: {1}'.format(np.min(correlations), np.max(correlations)))
     # Drop the examples set to min or max step.
@@ -99,6 +98,26 @@ def cross_run_correlations(annotators):
             figname='aoa_crossrun_correlation.pdf',
             xlabel='Run 0 AoA', ylabel='Run 1 AoA')
 
+    # Forgettability scores.
+    scores = []
+    for annotator in annotators:
+        scores.append(annotator.get_forgettability_scores())
+    correlations = get_correlations(scores)
+    print('Forgettability cross-run correlation: {0} +/- {1}'.format(
+            np.mean(correlations), np.std(correlations)))
+    print('Min: {0}, Max: {1}'.format(np.min(correlations), np.max(correlations)))
+    # Drop the examples set to min or max step.
+    mask = ((scores[0] != np.min(scores[0])) & (scores[0] != np.max(scores[0])) &
+            (scores[1] != np.min(scores[1])) & (scores[1] != np.max(scores[1])))
+    plot_correlation_hist(scores[0][mask], scores[1][mask],
+            figname='forgettability_crossrun_correlation.pdf',
+            xlabel='Run 0 forgettability', ylabel='Run 1 forgettability')
+    return
+
+
+# Plot performance correlation during pre-training.
+# Plot correlation with n-grams during pre-training.
+def crossrun_surprisal_correlations(annotators):
     # Surprisals during pre-training.
     print('Computing cross-run surprisal correlations during pre-training.')
     log10_steps = annotators[0].get_log10_steps()
@@ -139,6 +158,7 @@ def cross_run_correlations(annotators):
     ax.legend(loc='upper left', bbox_to_anchor=(1.0, 1.0))
     ax.set_ylabel('Correlation with n-gram surprisal')
     ax.set_xlabel('Pre-training step (log10)')
+    ax.set_xlim(2.0, 6.0)
     plt.savefig(os.path.join(FIGURE_DIR, 'surprisal_ngram_correlation.pdf'), bbox_inches='tight')
     # Plot correlation between runs.
     fig = plt.figure(figsize=(4, 3))
@@ -157,6 +177,7 @@ def cross_run_correlations(annotators):
                 horizontalalignment='left', backgroundcolor='white')
     ax.set_ylabel('Cross-run surprisal correlation')
     ax.set_xlabel('Pre-training step (log10)')
+    ax.set_xlim(2.0, 6.0)
     plt.savefig(os.path.join(FIGURE_DIR, 'surprisal_crossrun_correlation.pdf'), bbox_inches='tight')
     return
 
@@ -167,14 +188,15 @@ def dataset_map(annotators):
     confidence_scores = []
     variability_scores = []
     for annotator in annotators:
-        confidence_scores.append(annotator.get_confidence_scores(last_n=last_n))
-        variability_scores.append(annotator.get_variability_scores(last_n=last_n))
+        prob_curves = annotator.get_surprisal_curves()
+        # Convert from suprisal to raw probability.
+        prob_curves = np.power(2, -1.0*prob_curves)
+        variability_scores.append(np.std(prob_curves[:, -last_n:], axis=-1))
+        confidence_scores.append(np.mean(prob_curves[:, -last_n:], axis=-1))
     confidence_scores = np.concatenate(confidence_scores, axis=0)
     variability_scores = np.concatenate(variability_scores, axis=0)
-    # Convert from suprisal to raw probability.
-    confidence_scores = np.power(2, -1.0*confidence_scores)
-    plot_correlation_hist(confidence_scores, variability_scores, figname='dataset_map.pdf',
-                  xlabel='Confidence (P)', ylabel='Variability (stdev(surprisal))')
+    plot_correlation_hist(variability_scores, confidence_scores, figname='dataset_map.pdf',
+                  xlabel='Variability (stdev(P))', ylabel='Confidence (mean(P))')
     return
 
 
@@ -186,7 +208,9 @@ def main():
         annotators.append(annotator)
     # Run analyses.
     dataset_map(annotators)
-    cross_run_correlations(annotators)
+    crossrun_correlations(annotators)
+    crossrun_surprisal_correlations(annotators)
+    # Correlations between the four metrics.
 
 
 if __name__ == "__main__":
