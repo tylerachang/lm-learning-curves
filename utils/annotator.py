@@ -1,11 +1,13 @@
 import os
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 import codecs
 from collections import defaultdict, Counter
 import math
 import pickle
 import gc
+import itertools
 
 from utils.data_utils import get_examples as get_file_examples
 from utils.formula_utils import compute_aoa_vals, get_curve_slopes
@@ -31,7 +33,7 @@ get_target_ngram_surprisals()
 get_gam_curves()
 get_umap_coordinates()
 get_pos_tag_sequences()
-
+get_contextual_diversities()
 
 """
 class CurveAnnotator:
@@ -150,10 +152,10 @@ class CurveAnnotator:
         np.save(surprisal_curves_path, surprisal_curves, allow_pickle=False)
         return surprisal_curves
 
-    # Returns the confidence scores, the mean surprisal during the last_n checkpoints
+    # Returns the surprisal scores, the mean surprisal during the last_n checkpoints
     # of pre-training. Misnomer: high values = low confidence.
     # Shape: (n_examples).
-    def get_confidence_scores(self, last_n=27):
+    def get_confidence_scores(self, last_n=11):
         # Load surprisal curves or throw error.
         surprisal_curves_path = os.path.join(self.cache_dir, 'surprisal_curves.npy')
         if os.path.isfile(surprisal_curves_path):
@@ -164,9 +166,9 @@ class CurveAnnotator:
         return confidence_scores
 
     # Returns the variability scores, the mean surprisal during the last_n checkpoints
-    # of pre-training.
+    # of pre-training. These are within-run (across-step) variability scores.
     # Shape: (n_examples).
-    def get_variability_scores(self, last_n=27):
+    def get_variability_scores(self, last_n=11):
         # Load surprisal curves or throw error.
         surprisal_curves_path = os.path.join(self.cache_dir, 'surprisal_curves.npy')
         if os.path.isfile(surprisal_curves_path):
@@ -743,6 +745,76 @@ class CurveAnnotator:
         return forgettability
 
     # Shape: (n_examples).
+    # Gets the contextual diversity per example.
+    # Each value is the count of unique previous tokens.
+    def get_contextual_diversities(self, reference_id, window_size=30,
+                                   most_frequent=10000, sequences_path=None,
+                                   reference_path=None, vocab_size=None,
+                                   max_sequences=-1):
+        # Load per-token contextual diversities from cache if possible.
+        diversities_path = '{0}_contextual_diversities_{1}window_{2}frequent.npy'.format(reference_id, window_size, most_frequent)
+        diversities_path = os.path.join(self.cache_dir, diversities_path)
+        if os.path.isfile(diversities_path):
+            # Shape: (vocab_size).
+            diversities = np.load(diversities_path, allow_pickle=False)
+        else:
+            print('Computing raw contextual diversities.')
+            assert window_size > 0, 'Window size must be > 0.'
+            def update_co_occurrences(occurrence_matrix, example, window_size):
+                # Update the co-occurrence matrix with a single example.
+                # Rows: target_tokens, columns: co-occurring tokens.
+                # Shape: (vocab_size, n_tokens_to_consider). Considers
+                # co-occurrences with the first most_frequent tokens.
+                # example should be a list of token ids.
+                for idx, id in enumerate(example):
+                    # window_size previous tokens.
+                    start_window = max(0, idx-window_size)
+                    end_window = idx # Range is exclusive of end_window.
+                    for idx2 in range(start_window, end_window):
+                        id2 = example[idx2]
+                        if id2 < occurrence_matrix.shape[1]:
+                            occurrence_matrix[id, id2] += 1
+                return occurrence_matrix
+            # Count lines in infile, to sample the desired number of sequences.
+            print('Counting lines in reference file.')
+            infile = codecs.open(reference_path, 'rb', encoding='utf-8')
+            total_lines = 0
+            for line in tqdm(infile):
+                total_lines += 1
+            infile.close()
+            if max_sequences != -1 and total_lines > max_sequences:
+                lines_mask = np.zeros(total_lines, dtype=bool)
+                indices = np.random.choice(total_lines, size=max_sequences, replace=False)
+                lines_mask[indices] = True
+            else:
+                lines_mask = np.ones(total_lines, dtype=bool)
+            # Compute co-occurrence matrix.
+            occurrences = np.zeros((vocab_size, most_frequent), dtype=np.int32)
+            token_count = 0
+            infile = codecs.open(reference_path, 'rb', encoding='utf-8')
+            for line_i, line in tqdm(enumerate(infile), total=total_lines):
+                if not lines_mask[line_i]:
+                    continue
+                example = [int(token_id) for token_id in line.strip().split()]
+                token_count += len(example)
+                occurrences = update_co_occurrences(occurrences, example, window_size)
+            infile.close()
+            print('Total token count: {}'.format(token_count))
+            # For each token_id (row), how many unique tokens it co-occurs with.
+            diversities = np.sum(occurrences > 0, axis=-1)
+            np.save(diversities_path, diversities, allow_pickle=False)
+            print('Saved raw contextual diversities.')
+        # Map each example to the contextual diversity for the target token.
+        # Load examples.
+        # This should have been run previously with per_sequence set.
+        # Will throw an error otherwise.
+        examples = self.get_examples(sequences_path, per_sequence=None)
+        target_ids = [example[-1] for example in examples]
+        del examples
+        example_diversities = [diversities[target_id] for target_id in target_ids]
+        return np.array(example_diversities)
+
+    # Shape: (n_examples).
     # Noise variability.
     # Distance between surprisal curve and fitted GAM with 25 splines.
     def get_noise_scores(self):
@@ -757,9 +829,86 @@ class CurveAnnotator:
         return None
 
 
-# Shape: (n_examples).
-# Mean distance between fitted GAMs with 25 splines, across runs.
-# Should capture general trend, so excludes noise.
-def get_crossrun_variability(annotators):
-    # Not-implemented yet.
-    return None
+"""
+Functions that aggregate across annotators.
+"""
+
+# Shape: (n_examples, n_pairwise).
+# Distance between fitted GAMs with 25 splines, across runs.
+# Each column is a pair of pre-training runs.
+# Should capture general trend, so using GAMs excludes noise.
+# For each pair of curves, uses squared Euclidean distance divided by n_checkpoints
+# (i.e. the mean squared difference between the two curves).
+def get_crossrun_variability(annotators, use_gams=True):
+    # Load from cache if possible.
+    if use_gams:
+        outpath = 'crossrun_distances_gams.npy'
+    else:
+        outpath = 'crossrun_distances_raw.npy'
+    if os.path.isfile(outpath):
+        return np.load(outpath, allow_pickle=False)
+    print('Computing cross-run distances.')
+    all_curves = []
+    for annotator in annotators:
+        if use_gams:
+            curves = annotator.get_gam_curves(n_splines=25)
+        else:
+            curves = annotator.get_surprisal_curves()
+        all_curves.append(curves)
+    n_examples = all_curves[0].shape[0]
+    pairs = list(itertools.combinations(range(len(annotators)), 2))
+    crossrun_distances = np.nan * np.ones((n_examples, len(pairs)))
+    for pair_i, pair in enumerate(pairs):
+        i, j = pair
+        # Shape: (n_examples).
+        dists = np.mean(np.square(all_curves[i] - all_curves[j]), axis=-1)
+        crossrun_distances[:, pair_i] = dists
+    np.save(outpath, crossrun_distances, allow_pickle=False)
+    return crossrun_distances
+
+
+# Get a DataFrame of surprisal, variability (within-run), AoA, forgettability, unigram
+# target surprisal, 5-gram target surprisal, context unigram log-perplexity, and
+# POS. Includes a separate entry for each pre-training run score.
+def get_features_dataframe(annotators):
+    full_dataframe = pd.DataFrame()
+    # These are independent of the pre-training run.
+    unigram_scores = annotators[0].get_target_ngram_surprisals('full_train', 1)
+    ngram_scores = annotators[0].get_target_ngram_surprisals('full_train', 5)
+    context_scores = annotators[0].get_context_ngram_logppls('full_train', ngram_n=1, window_size=None)
+    pos_tags = [sequence[-1] for sequence in annotators[0].get_pos_tag_sequences()]
+    # For cross-run variability, use the average cross-run distance, across
+    # pre-training run pairs.
+    var_runs = np.mean(get_crossrun_variability(annotators, use_gams=True), axis=-1)
+    for annotator_i, annotator in enumerate(annotators):
+        data = dict()
+        data['unigram'] = unigram_scores
+        data['ngram'] = ngram_scores
+        data['context'] = context_scores
+        data['pos'] = pos_tags
+        data['var_runs'] = var_runs
+        data['surprisal'] = annotator.get_confidence_scores(last_n=11)
+        data['var_steps'] = annotator.get_variability_scores(last_n=11)
+        data['aoa'] = annotator.get_gam_aoas()[:, 0]
+        data['forgettability'] = annotator.get_forgettability_scores()
+        data['run_i'] = np.ones(len(unigram_scores), dtype=int) * annotator_i
+        data['example_i'] = np.arange(0, len(unigram_scores), dtype=int)
+        dataframe = pd.DataFrame(data)
+        dataframe['pos'] = dataframe['pos'].astype('category')
+        full_dataframe = pd.concat([full_dataframe, dataframe], ignore_index=True, axis=0)
+    return full_dataframe
+
+
+# Get a DataFrame of features, averaged across pre-training runs.
+# Also includes cross-run variability.
+def get_average_features_dataframe(annotators):
+    df = get_features_dataframe(annotators)
+    pos = df['pos']  # Cannot mean over categorical column.
+    # Group by example_i, mean, re-index.
+    df = df.drop(columns=['pos', 'run_i']).groupby('example_i').mean().reset_index()
+    # Add pos back in.
+    df['pos'] = pos
+    # Add cross-run variability.
+    crossrun_var = np.mean(get_crossrun_variability(annotators, use_gams=True), axis=-1)
+    df['var_runs'] = crossrun_var
+    return df

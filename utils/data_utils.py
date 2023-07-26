@@ -5,7 +5,6 @@ Data utilities for the monolingual pre-training analyses.
 import os
 import math
 import codecs
-import numpy as np
 
 # Returns a list of integers (checkpoint steps).
 def get_checkpoints(model_dir):

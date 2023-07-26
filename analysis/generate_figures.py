@@ -9,7 +9,9 @@ from tqdm import tqdm
 import itertools
 import scipy
 
-from utils.annotator import CurveAnnotator
+import sys
+sys.path.append('lm-learning-curves')
+from utils.annotator import CurveAnnotator, get_features_dataframe, get_average_features_dataframe, get_crossrun_variability
 
 FIGURE_DIR = 'figures'
 
@@ -51,37 +53,37 @@ def get_correlations(scores):
     return correlations
 
 
-# Mean correlation across runs for confidence, variability, AoA, and forgettability.
+# Mean correlation across runs for surprisal, variability (steps), AoA, and forgettability.
 # Plot correlation for runs 0 and 1.
 def crossrun_correlations(annotators):
-    print('Computing cross-run correlations for confidence, variability, AoA, and forgettability.')
+    print('Computing cross-run correlations for surprisal, variability (steps), AoA, and forgettability.')
     # Last 11: last 25% of pre-training.
     # Last 27: last 50% of pre-training.
     last_n = 11
 
-    # Confidence scores.
+    # Surprisal (related to inverse confidence) scores.
     scores = []
     for annotator in annotators:
         scores.append(annotator.get_confidence_scores(last_n=last_n))
     correlations = get_correlations(scores)
-    print('Confidence cross-run correlation: {0} +/- {1}'.format(
+    print('Surprisal cross-run correlation: {0} +/- {1}'.format(
             np.mean(correlations), np.std(correlations)))
     print('Min: {0}, Max: {1}'.format(np.min(correlations), np.max(correlations)))
     plot_correlation_hist(scores[0], scores[1],
-            figname='confidence_crossrun_correlation.pdf',
-            xlabel='Run 0 confidence', ylabel='Run 1 confidence')
+            figname='final_surprisal_crossrun_correlation.pdf',
+            xlabel='Run 0 surprisal', ylabel='Run 1 surprisal')
 
-    # Variability scores.
+    # Variability (across steps) scores.
     scores = []
     for annotator in annotators:
         scores.append(annotator.get_variability_scores(last_n=last_n))
     correlations = get_correlations(scores)
-    print('Variability cross-run correlation: {0} +/- {1}'.format(
+    print('Variability (steps) cross-run correlation: {0} +/- {1}'.format(
             np.mean(correlations), np.std(correlations)))
     print('Min: {0}, Max: {1}'.format(np.min(correlations), np.max(correlations)))
     plot_correlation_hist(scores[0], scores[1],
-            figname='variability_crossrun_correlation.pdf',
-            xlabel='Run 0 variability', ylabel='Run 1 variability')
+            figname='var_steps_crossrun_correlation.pdf',
+            xlabel='Run 0 var (steps)', ylabel='Run 1 var (steps)')
 
     # GAM AoA scores.
     scores = []
@@ -107,11 +109,59 @@ def crossrun_correlations(annotators):
             np.mean(correlations), np.std(correlations)))
     print('Min: {0}, Max: {1}'.format(np.min(correlations), np.max(correlations)))
     # Drop the examples set to min or max step.
-    mask = ((scores[0] != np.min(scores[0])) & (scores[0] != np.max(scores[0])) &
-            (scores[1] != np.min(scores[1])) & (scores[1] != np.max(scores[1])))
     plot_correlation_hist(scores[0][mask], scores[1][mask],
             figname='forgettability_crossrun_correlation.pdf',
             xlabel='Run 0 forgettability', ylabel='Run 1 forgettability')
+
+    # Variability (across runs).
+    crossrun_dists = get_crossrun_variability(annotators, use_gams=True)
+    # Compute correlation when using different subsets of the pre-training runs.
+    # Consider all possible ways to assign three runs to one group, and two
+    # runs to the other. Compute cross-run variability for each group, and get
+    # correlation.
+    correlations = []
+    size3_subsets = list(itertools.combinations(range(len(annotators)), 3))
+    orig_pairs = list(itertools.combinations(range(len(annotators)), 2))
+    for size3_subset in size3_subsets:
+        # Pairwise distances within the subset.
+        dist_indices = [pair_i for pair_i, pair in enumerate(orig_pairs) if (pair[0] in size3_subset) and (pair[1] in size3_subset)]
+        var1 = np.mean(crossrun_dists[:, dist_indices], axis=-1)
+        # Pairwise distances outside the subset.
+        dist_indices = [pair_i for pair_i, pair in enumerate(orig_pairs) if (pair[0] not in size3_subset) and (pair[1] not in size3_subset)]
+        var2 = np.mean(crossrun_dists[:, dist_indices], axis=-1)
+        r, p = scipy.stats.pearsonr(var1, var2)
+        correlations.append(r)
+    print('Variability (runs) cross-run-subset correlation (disjoint): {0} +/- {1}'.format(
+            np.mean(correlations), np.std(correlations)))
+    print('Min: {0}, Max: {1}'.format(np.min(correlations), np.max(correlations)))
+    # Instead, consider all 4-run subsets.
+    # Pairs of subsets, each subset defined by the run it drops.
+    subset_pairs = itertools.combinations(range(len(annotators)), 2)
+    correlations = []
+    orig_pairs = list(itertools.combinations(range(len(annotators)), 2))
+    for drop_i, drop_j in subset_pairs:
+        # Pairwise distances within the first subset.
+        dist_indices = [pair_i for pair_i, pair in enumerate(orig_pairs) if (pair[0] != drop_i) and (pair[1] != drop_i)]
+        var1 = np.mean(crossrun_dists[:, dist_indices], axis=-1)
+        # Pairwise distances within the second subset.
+        dist_indices = [pair_i for pair_i, pair in enumerate(orig_pairs) if (pair[0] != drop_j) and (pair[1] != drop_j)]
+        var2 = np.mean(crossrun_dists[:, dist_indices], axis=-1)
+        r, p = scipy.stats.pearsonr(var1, var2)
+        correlations.append(r)
+    print('Variability (runs) cross-run-subset correlation (4-run subsets): {0} +/- {1}'.format(
+            np.mean(correlations), np.std(correlations)))
+    print('Min: {0}, Max: {1}'.format(np.min(correlations), np.max(correlations)))
+
+    # Correlation between GAM distance and raw surprisal curve distance.
+    gams_dists = get_crossrun_variability(annotators, use_gams=True).flatten()
+    raw_dists = get_crossrun_variability(annotators, use_gams=False).flatten()
+    r, p = scipy.stats.pearsonr(gams_dists, raw_dists)
+    print('Correlation between GAMS cross-run distance and raw cross-run distance: r={}'.format(r))
+    # Correlation between GAM-based cross-run variability and raw cross-run variability.
+    gams_variability = np.mean(get_crossrun_variability(annotators, use_gams=True), axis=-1)
+    raw_variability = np.mean(get_crossrun_variability(annotators, use_gams=False), axis=-1)
+    r, p = scipy.stats.pearsonr(gams_variability, raw_variability)
+    print('Correlation between GAMS cross-run var and raw cross-run var: r={}'.format(r))
     return
 
 
@@ -147,7 +197,7 @@ def crossrun_surprisal_correlations(annotators):
             ngram_corr_means[ngram_i, checkpoint_i] = np.mean(corrs)
             ngram_corr_stdevs[ngram_i, checkpoint_i] = np.std(corrs)
     # Plot correlation with n-grams.
-    fig = plt.figure(figsize=(4, 3))
+    fig = plt.figure(figsize=(5, 3))
     ax = fig.add_subplot()
     for ngram_i in range(5):
         ax.plot(log10_steps, ngram_corr_means[ngram_i], label='{}-gram'.format(ngram_i+1))
@@ -161,7 +211,7 @@ def crossrun_surprisal_correlations(annotators):
     ax.set_xlim(2.0, 6.0)
     plt.savefig(os.path.join(FIGURE_DIR, 'surprisal_ngram_correlation.pdf'), bbox_inches='tight')
     # Plot correlation between runs.
-    fig = plt.figure(figsize=(4, 3))
+    fig = plt.figure(figsize=(5, 3))
     ax = fig.add_subplot()
     # Outlier correlation:
     # Step 451441, run 4 has correlation ~0.962 with other runs instead of 0.973.
@@ -173,8 +223,9 @@ def crossrun_surprisal_correlations(annotators):
     for ngram_i in range(5):
         log10_step = log10_steps[np.argmax(ngram_corr_means[ngram_i])]
         ax.axvline(x=log10_step, linestyle='dashed', color='mediumblue', alpha=0.60)
-        ax.text(log10_step, 0.95-ngram_i*0.01, '{}-gram'.format(ngram_i+1),
-                horizontalalignment='left', backgroundcolor='white')
+        t = ax.text(log10_step, 0.95-ngram_i*0.01, '{}-gram'.format(ngram_i+1),
+                horizontalalignment='left')
+        t.set_bbox(dict(facecolor='white', alpha=0.50, edgecolor='white'))
     ax.set_ylabel('Cross-run surprisal correlation')
     ax.set_xlabel('Pre-training step (log10)')
     ax.set_xlim(2.0, 6.0)
@@ -196,7 +247,27 @@ def dataset_map(annotators):
     confidence_scores = np.concatenate(confidence_scores, axis=0)
     variability_scores = np.concatenate(variability_scores, axis=0)
     plot_correlation_hist(variability_scores, confidence_scores, figname='dataset_map.pdf',
-                  xlabel='Variability (stdev(P))', ylabel='Confidence (mean(P))')
+                  xlabel='Variability (stdev(P))', ylabel='Confidence (mean(P))',
+                  figsize=(4,3))
+    return
+
+
+def cross_metric_correlations(annotators):
+    # All within-run metrics, concatenating scores for all runs.
+    dataframe = get_features_dataframe(annotators)
+    print('Concatenating scores for all runs (except var_runs):')
+    print(dataframe[['surprisal', 'var_steps', 'aoa', 'forgettability', 'var_runs']].corr())
+    del dataframe
+    # All metrics, averaging across runs.
+    dataframe = get_average_features_dataframe(annotators)
+    print('Averaging scores for all runs:')
+    print(dataframe[['surprisal', 'var_steps', 'aoa', 'forgettability', 'var_runs']].corr())
+    del dataframe
+    return
+
+
+def plot_contextual_diversity(annotator):
+    # Plot raw contextual diversity vs. unigram frequency.
     return
 
 
@@ -206,11 +277,16 @@ def main():
     for run_i in range(5):
         annotator = CurveAnnotator(os.path.join(annotators_dir, 'gpt2_{}'.format(run_i)))
         annotators.append(annotator)
-    # Run analyses.
-    dataset_map(annotators)
-    crossrun_correlations(annotators)
-    crossrun_surprisal_correlations(annotators)
+    # Plot contextual diversity adjustment.
+    plot_contextual_diversity(annotators[0])
     # Correlations between the four metrics.
+    cross_metric_correlations(annotators)
+    # Plot dataset map (confidence vs. variability).
+    dataset_map(annotators)
+    # Get correlations for each metric across runs.
+    crossrun_correlations(annotators)
+    # Get surprisal correlations across runs, over pre-training steps.
+    crossrun_surprisal_correlations(annotators)
 
 
 if __name__ == "__main__":

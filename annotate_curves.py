@@ -36,7 +36,8 @@ def create_parser():
     parser.add_argument('--model_dir', type=str, required=True)
     # Tokens to consider per sequence (e.g. 10 / 128).
     parser.add_argument('--per_sequence', type=int, default=10)
-    # Vocab size to initialize n-gram counts and to compute chance surprisal.
+    # Vocab size to initialize n-gram and contextual diversity counts and to
+    # compute chance surprisal.
     parser.add_argument('--vocab_size', type=int, default=50004)
     # Whether to run n-gram computations.
     parser.add_argument('--compute_ngrams', type=bool, default=False)
@@ -84,6 +85,25 @@ def main(args):
                     reference_lines_mask=None, vocab_size=args.vocab_size, prune_every=1000000,
                     prune_minimum=2)
             del ngram_scores
+
+        # Compute raw contextual diversities.
+        # Base on 100M tokens.
+        # 100M / 128 = 781250 sequences.
+        contextual_diversities = annotator.get_contextual_diversities('train100m', window_size=30,
+                most_frequent=10000, sequences_path=args.sequences_file,
+                reference_path=args.training_file, vocab_size=args.vocab_size,
+                max_sequences=781250)
+        # Base on 1B tokens.
+        # 1B / 128 = 7812500 sequences.
+        contextual_diversities = annotator.get_contextual_diversities('train1b', window_size=30,
+                most_frequent=10000, sequences_path=args.sequences_file,
+                reference_path=args.training_file, vocab_size=args.vocab_size,
+                max_sequences=7812500)
+        # Full training set.
+        contextual_diversities = annotator.get_contextual_diversities('full_train', window_size=30,
+                most_frequent=10000, sequences_path=args.sequences_file,
+                reference_path=args.training_file, vocab_size=args.vocab_size,
+                max_sequences=-1)
 
     # Get POS tags.
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, cache_dir='hf_cache')

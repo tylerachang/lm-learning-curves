@@ -6,4 +6,8 @@ I.e. do some example pairs consistently have correlated noise, across
 pre-training runs?
 """
 
+import sys
+sys.path.append('lm-learning-curves')
+from utils.annotator import CurveAnnotator
+
 # TODO.
