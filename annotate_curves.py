@@ -42,6 +42,7 @@ def create_parser():
     # Whether to run n-gram computations.
     parser.add_argument('--compute_ngrams', type=bool, default=False)
     # Tokenizer to decode examples for POS tagging.
+    # Also used to get CLS token id for adjusting contextual diversity.
     parser.add_argument('--tokenizer', type=str, required=True)
     return parser
 
@@ -66,6 +67,8 @@ def main(args):
     gam_aoas = annotator.get_gam_aoas(chance_surprisal=chance_surprisal, proportion=0.50, gam_granularity=1000)
     del gam_aoas
 
+    # These features are independent of pre-training run, so are only computed
+    # for the first annotator.
     if args.compute_ngrams:
         # To compute and cache n-gram scores for the full training set.
         # Note: the cache for these files can be transferred for different training
@@ -104,11 +107,23 @@ def main(args):
                 most_frequent=10000, sequences_path=args.sequences_file,
                 reference_path=args.training_file, vocab_size=args.vocab_size,
                 max_sequences=-1)
+        del contextual_diversities
+        # Adjust contextual diversities
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, cache_dir='hf_cache')
+        adj_diversities = annotator.adjust_contextual_diversities('train100m', window_size=30,
+                most_frequent=10000, vocab_size=args.vocab_size, cls_token=tokenizer.cls_token_id,
+                unigram_reference_id='full_train', n_splines=25)
+        adj_diversities = annotator.adjust_contextual_diversities('train1b', window_size=30,
+                most_frequent=10000, vocab_size=args.vocab_size, cls_token=tokenizer.cls_token_id,
+                unigram_reference_id='full_train', n_splines=25)
+        adj_diversities = annotator.adjust_contextual_diversities('full_train', window_size=30,
+                most_frequent=10000, vocab_size=args.vocab_size, cls_token=tokenizer.cls_token_id,
+                unigram_reference_id='full_train', n_splines=25)
+        del adj_diversities
 
-    # Get POS tags.
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, cache_dir='hf_cache')
-    examples = annotator.get_pos_tag_sequences(args.sequences_file, tokenizer=tokenizer)
-    del examples
+        # Get POS tags.
+        pos_examples = annotator.get_pos_tag_sequences(args.sequences_file, tokenizer=tokenizer)
+        del pos_examples
 
     # Get UMAP coordinates.
     # For different numbers of sample curves:
@@ -117,10 +132,10 @@ def main(args):
     # 1M: n_neighbors=500
     umap_coords = annotator.get_umap_coordinates(n_neighbors=500, n_components=2)
     del umap_coords
+    umap_coords = annotator.get_umap_coordinates(n_neighbors=500, n_components=3)
+    del umap_coords
     # Fit GAMs.
     gam_curves = annotator.get_gam_curves(n_splines=25)
-    del gam_curves
-    gam_curves = annotator.get_gam_curves(n_splines=5)
     del gam_curves
     # Done.
     print("Done.")

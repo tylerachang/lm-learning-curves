@@ -8,6 +8,9 @@ import numpy as np
 from tqdm import tqdm
 import itertools
 import scipy
+import pickle
+import textwrap
+from transformers import AutoTokenizer
 
 import sys
 sys.path.append('lm-learning-curves')
@@ -131,7 +134,25 @@ def crossrun_correlations(annotators):
         var2 = np.mean(crossrun_dists[:, dist_indices], axis=-1)
         r, p = scipy.stats.pearsonr(var1, var2)
         correlations.append(r)
-    print('Variability (runs) cross-run-subset correlation (disjoint): {0} +/- {1}'.format(
+    print('\nVariability (runs) cross-run-subset correlation (disjoint): {0} +/- {1}'.format(
+            np.mean(correlations), np.std(correlations)))
+    print('Min: {0}, Max: {1}'.format(np.min(correlations), np.max(correlations)))
+    # Instead, consider all 3-run subsets. Then, each subset can only share
+    # at most two pre-training runs with another subset.
+    subsets = list(itertools.combinations(range(len(annotators)), 3))
+    subset_pairs = itertools.combinations(subsets, 2)
+    correlations = []
+    orig_pairs = list(itertools.combinations(range(len(annotators)), 2))
+    for subset1, subset2 in subset_pairs:
+        # Pairwise distances within the first subset.
+        dist_indices = [pair_i for pair_i, pair in enumerate(orig_pairs) if (pair[0] in subset1) and (pair[1] in subset1)]
+        var1 = np.mean(crossrun_dists[:, dist_indices], axis=-1)
+        # Pairwise distances within the second subset.
+        dist_indices = [pair_i for pair_i, pair in enumerate(orig_pairs) if (pair[0] in subset2) and (pair[1] in subset2)]
+        var2 = np.mean(crossrun_dists[:, dist_indices], axis=-1)
+        r, p = scipy.stats.pearsonr(var1, var2)
+        correlations.append(r)
+    print('Variability (runs) cross-run-subset correlation (3-run subsets): {0} +/- {1}'.format(
             np.mean(correlations), np.std(correlations)))
     print('Min: {0}, Max: {1}'.format(np.min(correlations), np.max(correlations)))
     # Instead, consider all 4-run subsets.
@@ -156,7 +177,7 @@ def crossrun_correlations(annotators):
     gams_dists = get_crossrun_variability(annotators, use_gams=True).flatten()
     raw_dists = get_crossrun_variability(annotators, use_gams=False).flatten()
     r, p = scipy.stats.pearsonr(gams_dists, raw_dists)
-    print('Correlation between GAMS cross-run distance and raw cross-run distance: r={}'.format(r))
+    print('\nCorrelation between GAMS cross-run distance and raw cross-run distance: r={}'.format(r))
     # Correlation between GAM-based cross-run variability and raw cross-run variability.
     gams_variability = np.mean(get_crossrun_variability(annotators, use_gams=True), axis=-1)
     raw_variability = np.mean(get_crossrun_variability(annotators, use_gams=False), axis=-1)
@@ -267,16 +288,118 @@ def cross_metric_correlations(annotators):
 
 
 def plot_contextual_diversity(annotator):
+    token_mask = np.ones(50004, dtype=bool)
+    token_mask[50000] = False  # CLS token has high frequency, zero diversity.
     # Plot raw contextual diversity vs. unigram frequency.
+    # Get raw contextual diversity per token.
+    diversities_path = 'annotators/gpt2_0/{0}_contextual_diversities_{1}window_{2}frequent.npy'.format('train1b', 30, 10000)
+    diversities = np.load(diversities_path, allow_pickle=False)
+    # Get unigram log-frequencies.
+    ngrams_path = 'annotators/gpt2_0/full_train_1gram_counts.pickle'
+    with open(ngrams_path, 'rb') as handle:
+        ngrams = pickle.load(handle)
+    unigram_frequencies = np.nan * np.ones(50004)
+    unigram_counts = ngrams[tuple()]
+    total_count = np.sum(list(unigram_counts.values()))
+    for token_id, count in unigram_counts.items():
+        unigram_frequencies[token_id] = count / total_count
+    unigram_frequencies[np.isnan(unigram_frequencies)] = np.nanmin(unigram_frequencies)
+    logfreqs = np.log10(unigram_frequencies)
+    # Mask.
+    diversities = diversities[token_mask]
+    logfreqs = logfreqs[token_mask]
+    # Compute GAM.
+    from pygam import LinearGAM
+    gam = LinearGAM(n_splines=25)
+    gam.gridsearch(X=logfreqs.reshape(-1, 1), y=diversities,
+            lam=np.logspace(-3, 3, 11, base=10.0), progress=False)
+    x = np.linspace(np.min(logfreqs), np.max(logfreqs), num=1000, endpoint=True)
+    predicted = gam.predict(x)
+    # Plot.
+    fig = plt.figure(figsize=(3, 3))
+    ax = fig.add_subplot()
+    ax.scatter(logfreqs, diversities, color='blue', s=1.0, alpha=0.25)
+    ax.plot(x, predicted, color='black')
+    ax.set_ylabel('Raw contextual diversity')
+    ax.set_xlabel('Log-frequency')
+    plt.savefig(os.path.join(FIGURE_DIR, 'raw_contextual_diversity.pdf'), bbox_inches='tight')
+    print('Plotted raw contextual diversity vs. log-frequency.')
+    return
+
+
+# Plot example curve for different pre-training runs.
+def plot_example_runs(annotators, example_id, examples, tokenizer):
+    fig = plt.figure(figsize=(5,3))
+    ax = fig.add_subplot()
+    log10_steps = annotators[0].get_log10_steps()[1:]
+    for annotator in annotators:
+        surprisal_curves = annotator.get_surprisal_curves()
+        ax.plot(log10_steps, surprisal_curves[example_id, 1:], color='black', linewidth=0.5, alpha=0.25)
+    del surprisal_curves
+    for annotator in annotators:
+        gam_curves = annotator.get_gam_curves(n_splines=25)
+        ax.plot(log10_steps, gam_curves[example_id, :], color='blueviolet', linewidth=1.5, alpha=0.75)
+    del gam_curves
+    context = tokenizer.decode(examples[example_id][:-1])
+    target = tokenizer.decode(examples[example_id][-1])
+    title_text = text='"{0}" \u2192 "{1}"'.format(context, target)
+    wrapper = textwrap.TextWrapper(width=50)
+    ax.set_title('\n'.join(wrapper.wrap(title_text)), loc='left', style='italic', fontsize=11.0)
+    ax.set_xlabel('Pre-training step (log10)')
+    ax.set_xlim(2.0, 6.0)
+    ax.set_ylabel('Surprisal')
+    plt.savefig(os.path.join(FIGURE_DIR, 'example{}_crossrun.pdf'.format(example_id)), bbox_inches='tight')
+    print('Plotted example {} across runs.'.format(example_id))
+    return
+
+
+# Plot a single example curve for a single pre-training run.
+def plot_examples(annotator, example_ids, colors, examples, tokenizer):
+    fig = plt.figure(figsize=(5,3))
+    ax = fig.add_subplot()
+    log10_steps = annotator.get_log10_steps()[1:]
+    surprisal_curves = annotator.get_surprisal_curves()[:, 1:]
+    gam_curves = annotator.get_gam_curves(n_splines=25)
+    for i, example_id in enumerate(example_ids):
+        context = tokenizer.decode(examples[example_id][:-1])
+        target = tokenizer.decode(examples[example_id][-1])
+        example_text = text='"{0}" \u2192 "{1}"'.format(context, target)
+        wrapper = textwrap.TextWrapper(width=40)
+        example_text = '\n'.join(wrapper.wrap(example_text))
+        ax.plot(log10_steps, surprisal_curves[example_id, :], color='black', linewidth=0.5, alpha=0.75)
+        ax.plot(log10_steps, gam_curves[example_id, :], color=colors[i], linewidth=1.5, label=example_text, alpha=0.50)
+    ax.set_xlabel('Pre-training step (log10)')
+    ax.set_xlim(2.0, 6.0)
+    ax.set_ylabel('Surprisal')
+    properties = {'style': 'italic', 'size': 11.0}
+    legend = ax.legend(loc='lower left', bbox_to_anchor=(0.0, 1.0), prop=properties)
+    for lh in legend.legend_handles:
+        lh.set_alpha(1.0)
+    fname = 'examples_{}.pdf'.format('_'.join([str(id) for id in example_ids]))
+    plt.savefig(os.path.join(FIGURE_DIR, fname), bbox_inches='tight')
+    print('Plotted examples {} across runs.'.format(str(example_ids)))
     return
 
 
 def main():
     annotators_dir = 'annotators'
+    sequences_path = 'datasets_tokenized_split/en_tokenized_eval_100000.txt'
     annotators = []
     for run_i in range(5):
         annotator = CurveAnnotator(os.path.join(annotators_dir, 'gpt2_{}'.format(run_i)))
         annotators.append(annotator)
+    tokenizer = AutoTokenizer.from_pretrained('hf_tokenizer', cache_dir='hf_cache')
+    examples = annotators[0].get_examples(sequences_path)
+
+    # Plot sample curves.
+    # Examples with high forgettability, across runs.
+    for example_id in [856051, 861125]:
+        plot_example_runs(annotators, example_id, examples, tokenizer)
+    # Sample curves, to demonstrate GAMs and generally decreasing surprisal.
+    example_ids = [110, 130, 210]
+    colors = ['red', 'blueviolet', 'blue']
+    plot_examples(annotators[0], example_ids, colors, examples, tokenizer)
+
     # Plot contextual diversity adjustment.
     plot_contextual_diversity(annotators[0])
     # Correlations between the four metrics.

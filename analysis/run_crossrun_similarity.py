@@ -17,6 +17,7 @@ USE_GAMS = False
 RUN_I = 0
 RUN_J = 1
 
+
 # Run experiment.
 os.makedirs('rank_similarities', exist_ok=True)
 filepath = 'rank_similarities/run{0}_run{1}_similarity_ranks'.format(RUN_I, RUN_J)

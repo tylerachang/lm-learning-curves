@@ -299,6 +299,9 @@ class CurveAnnotator:
         # Array of n-gram counts.
         # Entry i_0, ..., i_{n-1} is the count of
         # i_0, ..., i_{n-2}, i_{n-1}.
+        # Dictionary mapping context tuples to Counters:
+        # ngrams[(i-n+1, ..., i-1)][i] = count
+        # Note: for unigrams, the first key is an empty tuple.
         ngrams_path = os.path.join(self.cache_dir, '{0}_{1}gram_counts.pickle'.format(reference_id, ngram_n))
         # Get ngram counts.
         if os.path.isfile(ngrams_path):
@@ -624,7 +627,7 @@ class CurveAnnotator:
             print('Error: no surprisal curves cached; run get_surprisal_curves() first.')
         # Run UMAP.
         umap_model = umap.UMAP(low_memory=False, n_neighbors=n_neighbors, metric='euclidean',
-                               n_components=2, verbose=True)
+                               n_components=n_components, verbose=True)
         umap_coords = umap_model.fit_transform(surprisal_curves)
         np.save(umap_path, umap_coords, allow_pickle=False)
         return umap_coords
@@ -750,9 +753,12 @@ class CurveAnnotator:
     def get_contextual_diversities(self, reference_id, window_size=30,
                                    most_frequent=10000, sequences_path=None,
                                    reference_path=None, vocab_size=None,
-                                   max_sequences=-1):
+                                   max_sequences=-1, adjusted=False):
         # Load per-token contextual diversities from cache if possible.
         diversities_path = '{0}_contextual_diversities_{1}window_{2}frequent.npy'.format(reference_id, window_size, most_frequent)
+        if adjusted:
+            # Need to have run adjust_contextual_diversities().
+            diversities_path = diversities_path.replace('.npy', '_adjusted.npy')
         diversities_path = os.path.join(self.cache_dir, diversities_path)
         if os.path.isfile(diversities_path):
             # Shape: (vocab_size).
@@ -814,6 +820,56 @@ class CurveAnnotator:
         example_diversities = [diversities[target_id] for target_id in target_ids]
         return np.array(example_diversities)
 
+    # Adjusts and saves contextual_diversities.
+    # The GAM curve is fitted without the CLS token (very high frequency, zero
+    # raw diversity). The CLS token adjusted diversity is set to the minimum
+    # adjusted diversity of any other token.
+    # Must have run get_contextual_diversities() and get_ngram_surprisals() for
+    # unigrams.
+    def adjust_contextual_diversities(self, reference_id, window_size=30,
+            most_frequent=10000, vocab_size=None, cls_token=None,
+            unigram_reference_id='full_train', n_splines=25):
+        # Load per-token contextual diversities from cache if possible.
+        diversities_path = '{0}_contextual_diversities_{1}window_{2}frequent.npy'.format(reference_id, window_size, most_frequent)
+        diversities_path = os.path.join(self.cache_dir, diversities_path)
+        adjusted_diversities_path = diversities_path.replace('.npy', '_adjusted.npy')
+        if os.path.isfile(adjusted_diversities_path):
+            print('Contextual diversities already adjusted.')
+            return
+        # Shape: (vocab_size).
+        diversities = np.load(diversities_path, allow_pickle=False)
+        # Mask CLS token.
+        token_mask = np.ones(vocab_size, dtype=bool)
+        token_mask[cls_token] = False  # CLS token has high frequency, zero diversity.
+        # Get unigram log-frequencies.
+        ngrams_path = os.path.join(self.cache_dir, '{}_1gram_counts.pickle'.format(unigram_reference_id))
+        with open(ngrams_path, 'rb') as handle:
+            ngrams = pickle.load(handle)
+        unigram_frequencies = np.nan * np.ones(vocab_size)
+        unigram_counts = ngrams[tuple()]
+        total_count = np.sum(list(unigram_counts.values()))
+        for token_id, count in unigram_counts.items():
+            unigram_frequencies[token_id] = count / total_count
+        # Normalize to minimum frequency to remove -inf logs.
+        unigram_frequencies[np.isnan(unigram_frequencies)] = np.nanmin(unigram_frequencies)
+        logfreqs = np.log10(unigram_frequencies)
+        # Mask.
+        diversities = diversities[token_mask]
+        logfreqs = logfreqs[token_mask]
+        # Compute GAM.
+        from pygam import LinearGAM
+        gam = LinearGAM(n_splines=n_splines)
+        gam.gridsearch(X=logfreqs.reshape(-1, 1), y=diversities,
+                lam=np.logspace(-3, 3, 11, base=10.0), progress=False)
+        predicted = gam.predict(logfreqs)
+        # Adjusted diversities.
+        adj_diversities = np.nan * np.ones(vocab_size)
+        adj_diversities[token_mask] = diversities - predicted
+        adj_diversities[cls_token] = np.nanmin(adj_diversities)
+        np.save(adjusted_diversities_path, adj_diversities, allow_pickle=False)
+        return adj_diversities
+
+
     # Shape: (n_examples).
     # Noise variability.
     # Distance between surprisal curve and fitted GAM with 25 splines.
@@ -869,13 +925,18 @@ def get_crossrun_variability(annotators, use_gams=True):
 
 # Get a DataFrame of surprisal, variability (within-run), AoA, forgettability, unigram
 # target surprisal, 5-gram target surprisal, context unigram log-perplexity, and
-# POS. Includes a separate entry for each pre-training run score.
-def get_features_dataframe(annotators):
+# POS. Includes a separate entry for each pre-training run score. Includes
+# contextual diversity if sequences_path is included.
+def get_features_dataframe(annotators, sequences_path=None):
     full_dataframe = pd.DataFrame()
     # These are independent of the pre-training run.
     unigram_scores = annotators[0].get_target_ngram_surprisals('full_train', 1)
     ngram_scores = annotators[0].get_target_ngram_surprisals('full_train', 5)
     context_scores = annotators[0].get_context_ngram_logppls('full_train', ngram_n=1, window_size=None)
+    diversity_scores = None
+    if sequences_path is not None:
+        diversity_scores = annotators[0].get_contextual_diversities('train1b', window_size=30,
+                most_frequent=10000, sequences_path=sequences_path, adjusted=True)
     pos_tags = [sequence[-1] for sequence in annotators[0].get_pos_tag_sequences()]
     # For cross-run variability, use the average cross-run distance, across
     # pre-training run pairs.
@@ -885,6 +946,8 @@ def get_features_dataframe(annotators):
         data['unigram'] = unigram_scores
         data['ngram'] = ngram_scores
         data['context'] = context_scores
+        if diversity_scores is not None:
+            data['contextual_div'] = diversity_scores
         data['pos'] = pos_tags
         data['var_runs'] = var_runs
         data['surprisal'] = annotator.get_confidence_scores(last_n=11)
@@ -901,8 +964,8 @@ def get_features_dataframe(annotators):
 
 # Get a DataFrame of features, averaged across pre-training runs.
 # Also includes cross-run variability.
-def get_average_features_dataframe(annotators):
-    df = get_features_dataframe(annotators)
+def get_average_features_dataframe(annotators, sequences_path):
+    df = get_features_dataframe(annotators, sequences_path=sequences_path)
     pos = df['pos']  # Cannot mean over categorical column.
     # Group by example_i, mean, re-index.
     df = df.drop(columns=['pos', 'run_i']).groupby('example_i').mean().reset_index()

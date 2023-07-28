@@ -182,3 +182,36 @@ def get_autoregressive_surprisals(model, examples, batch_size, tokenizer):
         all_surprisals = np.concatenate(all_surprisals, axis=0)
     print("Computed {} surprisals.".format(all_surprisals.shape[0]))
     return all_surprisals
+
+
+"""
+Autoregressively generates token ids, given an input prompt (list of token ids).
+Returns the generated token ids.
+"""
+def generate_text(model, input_ids, tokenizer, max_seq_len=128, temperature=0.0):
+    if len(input_ids) > max_seq_len:
+        return input_ids[:max_seq_len]
+    # Iteratively fill in tokens.
+    output_ids = []
+    while len(input_ids) + len(output_ids) < max_seq_len:
+        inputs = prepare_tokenized_examples([input_ids + output_ids], tokenizer)
+        # Note: here, labels are None (because not computing loss).
+        outputs = model(input_ids=inputs["input_ids"],
+                        attention_mask=inputs["attention_mask"],
+                        labels=inputs["labels"],
+                        output_hidden_states=False, return_dict=True)
+        # Note: logits pre-softmax.
+        logits = outputs["logits"].detach()
+        logits = logits[0] # First example only.
+        del outputs
+        # Logits for the last token.
+        index_logits = logits[-1, :]
+        softmax = torch.nn.Softmax(dim=0)
+        probs = softmax(index_logits)
+        if temperature > 0.0:
+            probs = torch.pow(probs, 1.0 / temperature)
+            fill_id = torch.multinomial(probs, 1).item() # Automatically rescales probs.
+        else:
+            fill_id = torch.argmax(probs).item()
+        output_ids.append(fill_id)
+    return output_ids

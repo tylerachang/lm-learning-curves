@@ -35,7 +35,7 @@ def get_examples(filepath, max_examples=-1):
         if len(examples) >= max_examples:
             break
         stripped_line = line.strip()
-        if stripped_line == "":
+        if stripped_line == '':
             continue
         example = [int(token_id) for token_id in stripped_line.split()]
         total_tokens += len(example)
