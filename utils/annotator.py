@@ -835,7 +835,7 @@ class CurveAnnotator:
         adjusted_diversities_path = diversities_path.replace('.npy', '_adjusted.npy')
         if os.path.isfile(adjusted_diversities_path):
             print('Contextual diversities already adjusted.')
-            return
+            return np.load(adjusted_diversities_path, allow_pickle=False)
         # Shape: (vocab_size).
         diversities = np.load(diversities_path, allow_pickle=False)
         # Mask CLS token.
