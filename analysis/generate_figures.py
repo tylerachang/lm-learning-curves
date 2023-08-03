@@ -22,7 +22,7 @@ FIGURE_DIR = 'figures'
 # Plot a correlation 2D histogram.
 def plot_correlation_hist(x, y, figname='figure.pdf',
               xlabel='', ylabel='', clip_std=5.0,
-              figsize=(3,3), dpi=300):
+              figsize=(3,3), dpi=1024):
     # Clipping.
     xmean = np.mean(x)
     xstd = np.std(x)
@@ -287,12 +287,12 @@ def cross_metric_correlations(annotators):
     return
 
 
-def plot_contextual_diversity(annotator):
+def plot_contextual_diversity(annotator, reference_id):
     token_mask = np.ones(50004, dtype=bool)
     token_mask[50000] = False  # CLS token has high frequency, zero diversity.
     # Plot raw contextual diversity vs. unigram frequency.
     # Get raw contextual diversity per token.
-    diversities_path = 'annotators/gpt2_0/{0}_contextual_diversities_{1}window_{2}frequent.npy'.format('train1b', 30, 10000)
+    diversities_path = 'annotators/gpt2_0/{0}_contextual_diversities_{1}window_{2}frequent.npy'.format(reference_id, 30, 10000)
     diversities = np.load(diversities_path, allow_pickle=False)
     # Get unigram log-frequencies.
     ngrams_path = 'annotators/gpt2_0/full_train_1gram_counts.pickle'
@@ -322,7 +322,8 @@ def plot_contextual_diversity(annotator):
     ax.plot(x, predicted, color='black')
     ax.set_ylabel('Raw contextual diversity')
     ax.set_xlabel('Log-frequency')
-    plt.savefig(os.path.join(FIGURE_DIR, 'raw_contextual_diversity.pdf'), bbox_inches='tight')
+    plt.savefig(os.path.join(FIGURE_DIR, '{}_contextual_diversity.png'.format(reference_id)),
+                bbox_inches='tight', dpi=1024)
     print('Plotted raw contextual diversity vs. log-frequency.')
     return
 
@@ -342,7 +343,7 @@ def plot_example_runs(annotators, example_id, examples, tokenizer):
     del gam_curves
     context = tokenizer.decode(examples[example_id][:-1])
     target = tokenizer.decode(examples[example_id][-1])
-    title_text = text='"{0}" \u2192 "{1}"'.format(context, target)
+    title_text = '"{0}" \u2192 "{1}"'.format(context, target)
     wrapper = textwrap.TextWrapper(width=50)
     ax.set_title('\n'.join(wrapper.wrap(title_text)), loc='left', style='italic', fontsize=11.0)
     ax.set_xlabel('Pre-training step (log10)')
@@ -363,7 +364,7 @@ def plot_examples(annotator, example_ids, colors, examples, tokenizer):
     for i, example_id in enumerate(example_ids):
         context = tokenizer.decode(examples[example_id][:-1])
         target = tokenizer.decode(examples[example_id][-1])
-        example_text = text='"{0}" \u2192 "{1}"'.format(context, target)
+        example_text = '"{0}" \u2192 "{1}"'.format(context, target)
         wrapper = textwrap.TextWrapper(width=40)
         example_text = '\n'.join(wrapper.wrap(example_text))
         ax.plot(log10_steps, surprisal_curves[example_id, :], color='black', linewidth=0.5, alpha=0.75)
@@ -391,6 +392,14 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained('hf_tokenizer', cache_dir='hf_cache')
     examples = annotators[0].get_examples(sequences_path)
 
+    # Check that POS tags make sense.
+    # seqs = annotators[0].get_pos_tag_sequences()
+    # pos_tags = [sequence[-1] for sequence in seqs]
+    # for example_id in range(4, 10000, 10):
+    #     context = tokenizer.decode(examples[example_id][:-1])
+    #     target = tokenizer.decode(examples[example_id][-1])
+    #     print('"{0}" \u2192 "{1}" ({2})'.format(context, target, pos_tags[example_id]))
+
     # Plot sample curves.
     # Examples with high forgettability, across runs.
     for example_id in [856051, 861125]:
@@ -401,7 +410,9 @@ def main():
     plot_examples(annotators[0], example_ids, colors, examples, tokenizer)
 
     # Plot contextual diversity adjustment.
-    plot_contextual_diversity(annotators[0])
+    plot_contextual_diversity(annotators[0], 'train100m')
+    plot_contextual_diversity(annotators[0], 'train1b')
+    plot_contextual_diversity(annotators[0], 'full_train')
     # Correlations between the four metrics.
     cross_metric_correlations(annotators)
     # Plot dataset map (confidence vs. variability).

@@ -696,36 +696,46 @@ class CurveAnnotator:
     # You may first need to run: python3 -m spacy download [spacy_model_name]
     # Default spaCy model: en_core_web_sm
     def get_pos_tag_sequences(self, sequences_path=None, tokenizer=None):
-        # Load from cache if possible.
+        # Load POS sequences from cache if possible.
+        # This is the POS sequence for each sequence. Shape: (n_sequences, seq_length).
         pos_path = os.path.join(self.cache_dir, 'pos_sequences.txt')
         if os.path.isfile(pos_path):
             tag_sequences = []
             infile = codecs.open(pos_path, 'rb', encoding='utf-8')
-            for line in tqdm(infile):
+            for line in infile:
                 tag_sequences.append(line.strip().split())
             infile.close()
-            return tag_sequences
-        print('Tagging POS.')
-        import spacy
-        # Load examples.
-        # This should have been run previously with per_sequence set.
-        # Will throw an error otherwise.
-        examples = self.get_examples(sequences_path, per_sequence=None)
-        # Load spaCy. Only need the tagger and tok2vec for POS-tagging.
-        spacy_nlp = spacy.load('en_core_web_sm', disable=['parser', 'ner',
-                'entity_linker', 'entity_ruler', 'lemmatizer', 'textcat', 'textcat_multilabel',
-                'senter', 'sentencizer', 'transformer'])
-        tag_sequences = []
-        for example in tqdm(examples):
-            tag_sequence = self.pos_tag_example(example, tokenizer, spacy_nlp)
-            tag_sequences.append(tag_sequence)
-        # Save to cache.
-        outfile = codecs.open(pos_path, 'wb', encoding='utf-8')
-        for tag_sequence in tag_sequences:
-            outfile.write(' '.join(tag_sequence))
-            outfile.write('\n')
-        outfile.close()
-        return tag_sequences
+        else:
+            print('Tagging POS.')
+            import spacy
+            # All the sequences. Shape: (n_examples, seq_len).
+            sequences = get_file_examples(sequences_path)
+            sequences = np.array(sequences)
+            # Load spaCy. Only need the tagger and tok2vec for POS-tagging.
+            spacy_nlp = spacy.load('en_core_web_sm', disable=['parser', 'ner',
+                    'entity_linker', 'entity_ruler', 'lemmatizer', 'textcat', 'textcat_multilabel',
+                    'senter', 'sentencizer', 'transformer'])
+            tag_sequences = []
+            for sequence in tqdm(sequences):
+                tag_sequence = self.pos_tag_example(sequence, tokenizer, spacy_nlp)
+                tag_sequences.append(tag_sequence)
+            # Save to cache.
+            outfile = codecs.open(pos_path, 'wb', encoding='utf-8')
+            for tag_sequence in tag_sequences:
+                outfile.write(' '.join(tag_sequence))
+                outfile.write('\n')
+            outfile.close()
+        # Now that we have the tag sequences, find the corresponding
+        # subsequence for each example.
+        tokens_mask_path = os.path.join(self.cache_dir, 'tokens_mask.npy')
+        tokens_mask = np.load(tokens_mask_path, allow_pickle=False)
+        examples = []
+        for sequence_i, sequence in enumerate(tag_sequences):
+            indices = np.where(tokens_mask[sequence_i, :])[0]
+            for index in indices:
+                # Sequence up to and including the index.
+                examples.append(list(sequence[0:index+1]))
+        return examples
 
     # Shape: (n_examples).
     # Forgettability scores.
@@ -933,9 +943,10 @@ def get_features_dataframe(annotators, sequences_path=None):
     unigram_scores = annotators[0].get_target_ngram_surprisals('full_train', 1)
     ngram_scores = annotators[0].get_target_ngram_surprisals('full_train', 5)
     context_scores = annotators[0].get_context_ngram_logppls('full_train', ngram_n=1, window_size=None)
+    context_lengths = annotators[0].get_context_lengths()
     diversity_scores = None
     if sequences_path is not None:
-        diversity_scores = annotators[0].get_contextual_diversities('train1b', window_size=30,
+        diversity_scores = annotators[0].get_contextual_diversities('full_train', window_size=30,
                 most_frequent=10000, sequences_path=sequences_path, adjusted=True)
     pos_tags = [sequence[-1] for sequence in annotators[0].get_pos_tag_sequences()]
     # For cross-run variability, use the average cross-run distance, across
@@ -943,9 +954,13 @@ def get_features_dataframe(annotators, sequences_path=None):
     var_runs = np.mean(get_crossrun_variability(annotators, use_gams=True), axis=-1)
     for annotator_i, annotator in enumerate(annotators):
         data = dict()
-        data['unigram'] = unigram_scores
-        data['ngram'] = ngram_scores
-        data['context'] = context_scores
+        # Surprisal -> log-probability.
+        data['unigram'] = -1.0 * unigram_scores
+        data['ngram'] = -1.0 * ngram_scores
+        # Log-perplexity -> log-probability.
+        data['context_logprob'] = -1.0 * context_scores
+        # Note: at least one context token (CLS).
+        data['context_loglen'] = np.log2(context_lengths)
         if diversity_scores is not None:
             data['contextual_div'] = diversity_scores
         data['pos'] = pos_tags
@@ -964,7 +979,7 @@ def get_features_dataframe(annotators, sequences_path=None):
 
 # Get a DataFrame of features, averaged across pre-training runs.
 # Also includes cross-run variability.
-def get_average_features_dataframe(annotators, sequences_path):
+def get_average_features_dataframe(annotators, sequences_path=None):
     df = get_features_dataframe(annotators, sequences_path=sequences_path)
     pos = df['pos']  # Cannot mean over categorical column.
     # Group by example_i, mean, re-index.
