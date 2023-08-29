@@ -112,6 +112,7 @@ python3 lm-learning-curves/annotate_curves.py \
 ## Run analyses.
 Sample text completions, run linear regressions to predict learning curve metrics, and generate figures.
 Note that relative paths are hard-coded in these files.
+Assumes that the code above has been run for five pre-training runs (gpt2_[0-4]).
 <pre>
 python3 lm-learning-curves/analysis/sample_text.py
 python3 lm-learning-curves/analysis/run_regressions.py
