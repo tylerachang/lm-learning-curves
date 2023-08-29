@@ -25,7 +25,8 @@ MAX_PROMPT_LENGTH = 64
 TEMPERATURE = 0.30
 MAX_SEQ_LEN = 128
 OUTPATH = 'sample_responses_gpt2_0.tsv'
-PROMPT_PATH = 'sample_prompts.txt'  # Tokenized prompts, sampled from annotator examples.
+# Loads from this path, or samples from annotator examples then saves here.
+PROMPT_PATH = 'sample_prompts.txt'  # Tokenized prompts.
 
 
 # Get prompts.

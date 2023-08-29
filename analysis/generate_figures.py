@@ -11,6 +11,8 @@ import scipy
 import pickle
 import textwrap
 from transformers import AutoTokenizer
+import statsmodels.formula.api as smf
+import pandas as pd
 
 import sys
 sys.path.append('lm-learning-curves')
@@ -382,6 +384,59 @@ def plot_examples(annotator, example_ids, colors, examples, tokenizer):
     return
 
 
+def plot_relationship(dataframe, var1, var2, plot_gam=False, plot_line=False):
+    var1_array = np.array(dataframe[var1])
+    var2_array = np.array(dataframe[var2])
+    # Plot.
+    fig = plt.figure(figsize=(3, 3))
+    ax = fig.add_subplot()
+    ax.hist2d(var1_array, var2_array, bins=[100, 100],
+              norm=mpl.colors.LogNorm(clip=True, vmin=1, vmax=10000),
+              cmap='Purples')
+    if plot_line:
+        # Linear regression.
+        reg = smf.ols(formula='{0} ~ {1} + 1'.format(var2, var1), data=dataframe).fit()
+        x = np.linspace(np.min(var1_array), np.max(var1_array), num=1000, endpoint=True)
+        new_dataframe = pd.DataFrame()
+        new_dataframe[var1] = x
+        predicted = reg.predict(new_dataframe)
+        ax.plot(x, predicted, color='black')
+    if plot_gam:
+        # Compute GAM.
+        from pygam import LinearGAM
+        gam = LinearGAM(n_splines=25)
+        gam.gridsearch(X=var1_array.reshape(-1, 1), y=var2_array,
+                lam=np.logspace(-3, 3, 11, base=10.0), progress=False)
+        x = np.linspace(np.min(var1_array), np.max(var1_array), num=1000, endpoint=True)
+        predicted = gam.predict(x)
+        ax.plot(x, predicted, color='black')
+    ax.set_xlabel(var1)
+    ax.set_ylabel(var2)
+    plt.savefig(os.path.join(FIGURE_DIR, 'plot_{0}_{1}.png'.format(var1, var2)),
+                bbox_inches='tight', dpi=1024)
+    print('Plotted {0} vs. {1}.'.format(var2, var1))
+    return
+
+
+# Plot a histogram of the minimum surprisals for all examples, computed using
+# GAMs.
+def plot_minimum_surprisals(annotators):
+    all = []
+    for annotator in annotators:
+        gam_curves = annotator.get_gam_curves(n_splines=25)
+        min_surprisals = np.min(gam_curves, axis=-1)
+        all.append(min_surprisals)
+    all = np.concatenate(all, axis=0)
+    fig = plt.figure(figsize=(4, 3))
+    ax = fig.add_subplot()
+    ax.hist(all, bins=500)
+    ax.set_xlabel('Minimum surprisal')
+    plt.savefig(os.path.join(FIGURE_DIR, 'min_surprisal_histogram.pdf'),
+                bbox_inches='tight')
+    print('Plotted minimum surprisal histogram.')
+    return
+
+
 def main():
     annotators_dir = 'annotators'
     sequences_path = 'datasets_tokenized_split/en_tokenized_eval_100000.txt'
@@ -399,6 +454,18 @@ def main():
     #     context = tokenizer.decode(examples[example_id][:-1])
     #     target = tokenizer.decode(examples[example_id][-1])
     #     print('"{0}" \u2192 "{1}" ({2})'.format(context, target, pos_tags[example_id]))
+
+    plot_minimum_surprisals(annotators)
+
+    average_df = get_average_features_dataframe(annotators, sequences_path)
+    plot_relationship(average_df, 'unigram', 'ngram', plot_line=True)
+    plot_relationship(average_df, 'context_loglen', 'context_logprob', plot_line=True)
+    plot_relationship(average_df, 'unigram', 'surprisal', plot_line=True)
+    plot_relationship(average_df, 'unigram', 'var_steps', plot_line=True)
+    plot_relationship(average_df, 'unigram', 'aoa', plot_line=True)
+    plot_relationship(average_df, 'unigram', 'forgettability', plot_line=True)
+    plot_relationship(average_df, 'unigram', 'var_runs', plot_line=True)
+    plot_relationship(average_df, 'contextual_div', 'aoa', plot_line=True)
 
     # Plot sample curves.
     # Examples with high forgettability, across runs.

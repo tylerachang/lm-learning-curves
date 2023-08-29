@@ -8,6 +8,7 @@ import math
 import pickle
 import gc
 import itertools
+import statsmodels.formula.api as smf
 
 from utils.data_utils import get_examples as get_file_examples
 from utils.formula_utils import compute_aoa_vals, get_curve_slopes
@@ -225,52 +226,66 @@ class CurveAnnotator:
     # Shape: (n_examples, 2).
     # Column 0: AoA (log-steps).
     # Column 1: surprisal threshold.
-    def get_gam_aoas(self, chance_surprisal=None, proportion=0.50, gam_granularity=1000):
+    def get_gam_aoas(self, chance_surprisal=None, proportion=0.50,
+                     gam_granularity=1000, n_splines=25):
         # Load from cache if possible.
         gam_aoa_path = os.path.join(self.cache_dir, 'gam_aoa.npy')
         if os.path.isfile(gam_aoa_path):
-            return np.load(gam_aoa_path, allow_pickle=False)
-        print('Computing AoA values using GAMs.')
-        from pygam import LinearGAM
-        # Note: fitted GAMs are not loaded from the cache, because they are not
-        # saved with high granularity.
-        surprisal_curves_path = os.path.join(self.cache_dir, 'surprisal_curves.npy')
-        if os.path.isfile(surprisal_curves_path):
-            surprisal_curves = np.load(surprisal_curves_path, allow_pickle=False)
+            gam_aoas = np.load(gam_aoa_path, allow_pickle=False)
         else:
-            print('Error: no surprisal curves cached; run get_surprisal_curves() first.')
-        # Get corresponding log10 steps.
-        log10_steps = self.get_log10_steps()
-        if np.isinf(log10_steps[0]):
-            log10_steps = log10_steps[1:]
-            surprisal_curves = surprisal_curves[:, 1:]
-        # For high granularity GAM.
-        gam_x = np.linspace(log10_steps[0], log10_steps[-1], num=gam_granularity, endpoint=True)
-        # Fit GAM and run AoA for each curve.
-        n_curves = surprisal_curves.shape[0]
-        gam_aoas = np.nan * np.ones((n_curves, 2))
-        for curve_i, surprisal_curve in tqdm(enumerate(surprisal_curves)):
-            # Same as in get_gam_curves().
-            gam = LinearGAM(n_splines=25)
-            gam.gridsearch(X=log10_steps.reshape(-1, 1), y=surprisal_curve,
-                    lam=np.logspace(-3, 3, 11, base=10.0), progress=False)
-            gam_curve = gam.predict(gam_x)
-            # Get AoA.
-            # Surprisals decreasing.
-            ymax = chance_surprisal
-            ymin = np.min(gam_curve)
-            ythreshold = ymax*(1-proportion) + ymin*proportion
-            gam_aoas[curve_i, 1] = ythreshold
-            if ythreshold >= chance_surprisal:
-                # Entire curve is above chance.
-                gam_aoas[curve_i, 0] = log10_steps[-1]
-                continue
-            for step_i, log10_step in enumerate(gam_x):
-                if gam_curve[step_i] <= ythreshold:
-                    gam_aoas[curve_i, 0] = log10_step
-                    break
-        np.save(gam_aoa_path, gam_aoas, allow_pickle=False)
+            print('Computing AoA values using GAMs.')
+            from pygam import LinearGAM
+            # Note: fitted GAMs are not loaded from the cache, because they are not
+            # saved with high granularity.
+            surprisal_curves_path = os.path.join(self.cache_dir, 'surprisal_curves.npy')
+            if os.path.isfile(surprisal_curves_path):
+                surprisal_curves = np.load(surprisal_curves_path, allow_pickle=False)
+            else:
+                print('Error: no surprisal curves cached; run get_surprisal_curves() first.')
+            # Get corresponding log10 steps.
+            log10_steps = self.get_log10_steps()
+            if np.isinf(log10_steps[0]):
+                log10_steps = log10_steps[1:]
+                surprisal_curves = surprisal_curves[:, 1:]
+            # For high granularity GAM.
+            gam_x = np.linspace(log10_steps[0], log10_steps[-1], num=gam_granularity, endpoint=True)
+            # Fit GAM and run AoA for each curve.
+            n_curves = surprisal_curves.shape[0]
+            gam_aoas = np.nan * np.ones((n_curves, 2))
+            for curve_i, surprisal_curve in tqdm(enumerate(surprisal_curves)):
+                # Same as in get_gam_curves().
+                gam = LinearGAM(n_splines=n_splines)
+                gam.gridsearch(X=log10_steps.reshape(-1, 1), y=surprisal_curve,
+                        lam=np.logspace(-3, 3, 11, base=10.0), progress=False)
+                gam_curve = gam.predict(gam_x)
+                # Get AoA.
+                # Surprisals decreasing.
+                ymax = chance_surprisal
+                ymin = np.min(gam_curve)
+                ythreshold = ymax*(1-proportion) + ymin*proportion
+                gam_aoas[curve_i, 1] = ythreshold
+                if ythreshold >= chance_surprisal:
+                    # Entire curve is above chance.
+                    gam_aoas[curve_i, 0] = log10_steps[-1]
+                    continue
+                for step_i, log10_step in enumerate(gam_x):
+                    if gam_curve[step_i] <= ythreshold:
+                        gam_aoas[curve_i, 0] = log10_step
+                        break
+            np.save(gam_aoa_path, gam_aoas, allow_pickle=False)
         return gam_aoas
+
+    # Mask to set examples with high minimum surprisals (above some percentile,
+    # e.g. 75.0) to NaN. These examples are considered "never learned". Then,
+    # some metrics (e.g. AoA) might be ill-defined.
+    def get_unlearned_mask(self, surprisal_percentile, n_splines=25):
+        # Filter by surprisal percentile threshold.
+        gam_curves = self.get_gam_curves(n_splines=n_splines)
+        min_surprisals = np.min(gam_curves, axis=-1)
+        threshold = np.percentile(min_surprisals, surprisal_percentile)
+        print('Using threshold surprisal: {}'.format(threshold))
+        unlearned_mask = min_surprisals > threshold
+        return unlearned_mask
 
     # For each sequence in sequences_path, returns the sequence of n-gram surprisals
     # conditioned on the previous tokens. For tokens with n-gram probability zero,
@@ -662,9 +677,10 @@ class CurveAnnotator:
                 for char_idx in range(start_char_idx, end_char_idx):
                     token_idx = char_to_token_idx[char_idx]
                     token_indices.add(token_idx)
+                # Only consider tokens that have not been matched yet.
                 token_indices = [token_idx for token_idx in token_indices if token_labels[token_idx] == '[UNMATCHED]']
                 # Set the corresponding token labels.
-                # Appends _B (beginning), _I (inside), and _L (last).
+                # Appends _B (beginning), _I (inside), _L (last), or _U (only).
                 for token_i, token_idx in enumerate(sorted(token_indices)):
                     if len(token_indices) == 1:
                         suffix = '_U'
@@ -936,56 +952,93 @@ def get_crossrun_variability(annotators, use_gams=True):
 # Get a DataFrame of surprisal, variability (within-run), AoA, forgettability, unigram
 # target surprisal, 5-gram target surprisal, context unigram log-perplexity, and
 # POS. Includes a separate entry for each pre-training run score. Includes
-# contextual diversity if sequences_path is included.
-def get_features_dataframe(annotators, sequences_path=None):
+# contextual diversity if sequences_path is included. If split_pos is True,
+# includes pos field and a pos_bilu field. If regress_ngrams is True, the ngram
+# field is the residuals of ngram log-probabilities after regressing out unigram
+# log-probability.
+def get_features_dataframe(annotators, sequences_path=None, split_pos=True,
+                           regress_ngrams=True, clip_predictors=5.0):
     full_dataframe = pd.DataFrame()
     # These are independent of the pre-training run.
-    unigram_scores = annotators[0].get_target_ngram_surprisals('full_train', 1)
-    ngram_scores = annotators[0].get_target_ngram_surprisals('full_train', 5)
-    context_scores = annotators[0].get_context_ngram_logppls('full_train', ngram_n=1, window_size=None)
+    # Multiply by -1.0: surprisal -> log-probability.
+    unigram_scores = -1.0 * annotators[0].get_target_ngram_surprisals('full_train', 1)
+    ngram_scores = -1.0 * annotators[0].get_target_ngram_surprisals('full_train', 5)
+    # Multiply by -1.0: log-perplexity -> log-probability.
+    context_scores = -1.0 * annotators[0].get_context_ngram_logppls('full_train', ngram_n=1, window_size=None)
     context_lengths = annotators[0].get_context_lengths()
     diversity_scores = None
     if sequences_path is not None:
         diversity_scores = annotators[0].get_contextual_diversities('full_train', window_size=30,
                 most_frequent=10000, sequences_path=sequences_path, adjusted=True)
     pos_tags = [sequence[-1] for sequence in annotators[0].get_pos_tag_sequences()]
+    if split_pos:
+        def tag_to_bilu(tag):
+            return 'U' if tag[0] == '[' else tag.split('_')[-1]
+        def tag_to_pos(tag):
+            return tag if tag[0] == '[' else tag.split('_')[0]
+        bilu_tags = [tag_to_bilu(tag) for tag in pos_tags]
+        pos_tags = [tag_to_pos(tag) for tag in pos_tags]
     # For cross-run variability, use the average cross-run distance, across
     # pre-training run pairs.
     var_runs = np.mean(get_crossrun_variability(annotators, use_gams=True), axis=-1)
     for annotator_i, annotator in enumerate(annotators):
         data = dict()
-        # Surprisal -> log-probability.
-        data['unigram'] = -1.0 * unigram_scores
-        data['ngram'] = -1.0 * ngram_scores
-        # Log-perplexity -> log-probability.
-        data['context_logprob'] = -1.0 * context_scores
+        data['unigram'] = unigram_scores
+        data['ngram'] = ngram_scores
+        data['context_logprob'] = context_scores
         # Note: at least one context token (CLS).
         data['context_loglen'] = np.log2(context_lengths)
         if diversity_scores is not None:
             data['contextual_div'] = diversity_scores
-        data['pos'] = pos_tags
         data['var_runs'] = var_runs
         data['surprisal'] = annotator.get_confidence_scores(last_n=11)
         data['var_steps'] = annotator.get_variability_scores(last_n=11)
-        data['aoa'] = annotator.get_gam_aoas()[:, 0]
+        aoas = annotator.get_gam_aoas()[:, 0]
+        # aoas[annotator.get_unlearned_mask(surprisal_percentile=95.0)] = np.nan
+        data['aoa'] = aoas
         data['forgettability'] = annotator.get_forgettability_scores()
         data['run_i'] = np.ones(len(unigram_scores), dtype=int) * annotator_i
         data['example_i'] = np.arange(0, len(unigram_scores), dtype=int)
         dataframe = pd.DataFrame(data)
+        dataframe['pos'] = pos_tags
         dataframe['pos'] = dataframe['pos'].astype('category')
+        if split_pos:
+            dataframe['pos_bilu'] = bilu_tags
+            dataframe['pos_bilu'] = dataframe['pos_bilu'].astype('category')
         full_dataframe = pd.concat([full_dataframe, dataframe], ignore_index=True, axis=0)
+    # Use ngram after accounting for unigram:
+    if regress_ngrams:
+        ngram_reg = smf.ols(formula='ngram ~ unigram + 1', data=full_dataframe).fit()
+        residuals = np.array(ngram_reg.resid)
+        full_dataframe['ngram'] = residuals
+    if clip_predictors is not None:
+        for predictor in ['unigram', 'ngram', 'context_logprob', 'context_loglen', 'contextual_div']:
+            if predictor not in full_dataframe.columns:
+                continue
+            mu = np.mean(full_dataframe[predictor])
+            sigma = np.std(full_dataframe[predictor])
+            full_dataframe[predictor] = np.clip(full_dataframe[predictor],
+                    mu-clip_predictors*sigma, mu+clip_predictors*sigma)
     return full_dataframe
 
 
 # Get a DataFrame of features, averaged across pre-training runs.
 # Also includes cross-run variability.
-def get_average_features_dataframe(annotators, sequences_path=None):
-    df = get_features_dataframe(annotators, sequences_path=sequences_path)
+def get_average_features_dataframe(annotators, sequences_path=None, split_pos=True,
+                                   regress_ngrams=True, clip_predictors=5.0):
+    df = get_features_dataframe(annotators, sequences_path=sequences_path,
+            split_pos=split_pos, regress_ngrams=regress_ngrams, clip_predictors=clip_predictors)
     pos = df['pos']  # Cannot mean over categorical column.
+    cols_to_drop = ['pos', 'run_i']
+    if split_pos:
+        bilu = df['pos_bilu']
+        cols_to_drop.append('pos_bilu')
     # Group by example_i, mean, re-index.
-    df = df.drop(columns=['pos', 'run_i']).groupby('example_i').mean().reset_index()
+    df = df.drop(columns=cols_to_drop).groupby('example_i').mean().reset_index()
     # Add pos back in.
     df['pos'] = pos
+    if split_pos:
+        df['pos_bilu'] = bilu
     # Add cross-run variability.
     crossrun_var = np.mean(get_crossrun_variability(annotators, use_gams=True), axis=-1)
     df['var_runs'] = crossrun_var
