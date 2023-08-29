@@ -99,6 +99,7 @@ This script runs the following:
 * Computes the contextual diversity score for each token (frequency-adjusted).
 * Annotates POS tags.
 * Runs UMAP to embed the learning curves in 2D.
+
 Requirements in requirements_analysis.txt (Python 3.8.17; using a different Python version for compatibility with pyGAM).
 <pre>
 python3 lm-learning-curves/annotate_curves.py \
