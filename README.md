@@ -1,6 +1,6 @@
 # lm-learning-curves
-Code for the paper, Characterizing Learning Curves During Language Model Pre-Training: Learning, Forgetting, and Stability (2023).
-Includes code for extracting and annotating learning curves.
+Code for the paper, [Characterizing Learning Curves During Language Model Pre-Training: Learning, Forgetting, and Stability](https://arxiv.org/abs/2308.15419) (2023).
+Includes code for extracting and annotating learning curves from language models during pre-training.
 
 ## Pre-train language models.
 Language models are pre-trained using: https://github.com/tylerachang/word-acquisition-language-models.
@@ -127,5 +127,6 @@ Sampling text completions can also be run with generate_text.py (see pre-trainin
   author={Tyler A. Chang and Zhuowen Tu and Benjamin K. Bergen},
   journal={arXiv preprint},
   year={2023},
+  url={https://arxiv.org/abs/2308.15419}
 }
 </pre>
