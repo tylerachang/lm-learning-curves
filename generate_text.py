@@ -28,6 +28,8 @@ def create_parser():
     # This should be generated from the pretraining scripts in:
     # https://github.com/tylerachang/word-acquisition-language-models
     parser.add_argument('--model_dir', required=True)
+    # If different from the model directory.
+    parser.add_argument('--tokenizer', default="")
     # gpt2 or bert.
     parser.add_argument('--model_type', default="gpt2")
     # Checkpoint step, or None to use final model.
@@ -58,8 +60,11 @@ def main(args):
         print("Nearest checkpoint step: {}".format(checkpoint))
 
     print("Loading config, tokenizer, and model...")
+    tokenizer_path_override = args.tokenizer if args.tokenizer else None
     config, tokenizer, model = load_model(args.model_dir, args.model_type,
-            checkpoint=checkpoint, cache_dir=args.hf_cache, override_for_hidden_states=False)
+            checkpoint=checkpoint, cache_dir=args.hf_cache,
+            tokenizer_path_override=tokenizer_path_override,
+            override_for_hidden_states=False)
 
     print("Encoding text...")
     curr_example = tokenizer.encode(args.text.strip(), add_special_tokens=False)
